@@ -165,7 +165,7 @@ export CLAUDE_SUBAGENT_MODE=session
 
 ```
 ╔═══════════════════════════════════════════════════════════════════════════════╗
-║          OpenClaw-style Main/Sub Agent Demo (Eino Framework)           ║
+║          LeeClaw Main/Sub Agent Demo (Eino Framework)           ║
 ║                                                                               ║
 ║  Features:                                                                   ║
 ║  • Async sub-agent spawning with immediate return                          ║
