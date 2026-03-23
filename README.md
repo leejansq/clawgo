@@ -127,11 +127,11 @@ export OPENAI_MODEL="GLM5"
 export OPENAI_BASE_URL="https://xxx.com/v1"
 
 # 运行 (使用 API 模型作为子 Agent)
-./open-demo --task "实现一个用户认证系统"
+./leeclaw --task "实现一个用户认证系统"
 
 # 使用 Claude Code CLI 作为子 Agent (需要安装 claude CLI)
 export USE_CLAUDE_CLI=true
-./open-demo --task "实现一个用户认证系统"
+./leeclaw --task "实现一个用户认证系统"
 
 # Claude CLI 子 Agent 模式配置
 # run 模式 (默认): 每次任务创建新进程
@@ -139,16 +139,16 @@ export CLAUDE_SUBAGENT_MODE=run
 
 # session 模式: 复用进程，支持多轮对话
 export CLAUDE_SUBAGENT_MODE=session
-./open-demo --task "实现一个用户认证系统"
+./leeclaw --task "实现一个用户认证系统"
 
 # 自定义参数
-./open-demo --task "..." --timeout 300 --max-depth 3
+./leeclaw --task "..." --timeout 300 --max-depth 3
 
 # 在现有项目上开发
-./open-demo --workspace ./my-existing-project --task "添加用户认证功能"
+./leeclaw --workspace ./my-existing-project --task "添加用户认证功能"
 
 # 使用 webhook 通知
-./open-demo --task "实现一个 HTTP 服务器" --webhook "https://example.com/webhook"
+./leeclaw --task "实现一个 HTTP 服务器" --webhook "https://example.com/webhook"
 ```
 
 ## 参数说明
