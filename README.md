@@ -2,7 +2,7 @@
 
 ## 概述
 
-本示例演示了如何基于 Eino 框架实现类似 OpenClaw 的主 Agent 与子 Agent 通讯机制。
+本项目实现了如何基于 Eino 框架实现类似 OpenClaw 的主 Agent 与子 Agent 通讯机制。
 
 ## OpenClaw 核心机制
 
