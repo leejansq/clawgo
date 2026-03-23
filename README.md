@@ -118,13 +118,13 @@ Main Agent (Eino Graph)
 
 ```bash
 # 进入目录
-cd quickstart/open-demo/cmd
+cd clawgo/cmd
 
 # 设置环境变量
 export OPENAI_API_KEY="your-key"
 # 或使用豆包
-export MODEL_TYPE="ark"
-export ARK_API_KEY="your-key"
+export OPENAI_MODEL="GLM5"
+export OPENAI_BASE_URL="https://xxx.com/v1"
 
 # 运行 (使用 API 模型作为子 Agent)
 ./open-demo --task "实现一个用户认证系统"
