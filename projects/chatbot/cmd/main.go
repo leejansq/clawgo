@@ -1,6 +1,6 @@
 /*
  * Chat Bot Management System - Main Entry Point
- * 启动主 Agent 管理器和服务
+ * 启动主 Agent管理器和服务
  */
 
 package main
