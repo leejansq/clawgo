@@ -141,6 +141,9 @@ type SubAgentManager struct {
 	// Claude CLI 进程池 (用于 session 模式复用)
 	claudeRunners map[string]*ClaudeRunner // key: workspace path
 
+	// Workspace 对应的 sessionID (持久化，保持一致)
+	workspaceSessionIDs map[string]string // key: workspace path, value: sessionID
+
 	// Announce 机制 (参考 OpenClaw subagent-announce)
 	announceChan chan *Announce // 子 Agent 完成通知通道
 }
@@ -188,8 +191,9 @@ func NewSubAgentManager(cm model.ChatModel, workspaceRoot string, maxDepth int) 
 		depth:         0,
 		maxDepth:      maxDepth,
 		useClaudeCLI:  os.Getenv("USE_CLAUDE_CLI") == "true",
-		claudeRunners: make(map[string]*ClaudeRunner), // Claude CLI 进程池
-		announceChan:  make(chan *Announce, 10),       // Announce 通道
+		claudeRunners: make(map[string]*ClaudeRunner),         // Claude CLI 进程池
+		workspaceSessionIDs: make(map[string]string),           // Workspace 对应的 sessionID (持久化)
+		announceChan:  make(chan *Announce, 10),               // Announce 通道
 	}
 }
 
@@ -207,7 +211,7 @@ func (m *SubAgentManager) GetOrCreateClaudeRunner(workspace, systemPrompt, task 
 	if mode == "session" {
 		if runner, exists := m.claudeRunners[workspace]; exists {
 			if runner.IsRunning() {
-				fmt.Printf("│ 🔄 [REUSE] Reusing Claude process for workspace: %s\n", workspace)
+				fmt.Printf("│ 🔄 [REUSE] Reusing Claude process for workspace: %s (sessionID=%s)\n", workspace, runner.sessionID)
 				return runner, true, nil
 			}
 			// 进程已停止，删除旧的
@@ -215,8 +219,17 @@ func (m *SubAgentManager) GetOrCreateClaudeRunner(workspace, systemPrompt, task 
 		}
 	}
 
-	// 创建新的 Runner
-	cliSessionID := generateUUID()
+	// 获取或创建持久的 sessionID（workspace 级别的 sessionID）
+	cliSessionID, exists := m.workspaceSessionIDs[workspace]
+	if !exists {
+		// 首次为该 workspace 生成 sessionID
+		cliSessionID = generateUUID()
+		m.workspaceSessionIDs[workspace] = cliSessionID
+		fmt.Printf("│ 🆕 [SESSION ID] Generated new sessionID=%s for workspace: %s\n", cliSessionID, workspace)
+	} else {
+		fmt.Printf("│ 🔄 [SESSION ID] Reusing existing sessionID=%s for workspace: %s\n", cliSessionID, workspace)
+	}
+
 	runner, err := NewClaudeRunner(workspace, cliSessionID, systemPrompt, task, mode)
 	if err != nil {
 		return nil, false, err
@@ -226,7 +239,7 @@ func (m *SubAgentManager) GetOrCreateClaudeRunner(workspace, systemPrompt, task 
 	if mode == "session" {
 		m.claudeRunners[workspace] = runner
 	}
-	fmt.Printf("│ 🆕 [NEW] Created new Claude process for workspace: %s (mode=%s)\n", workspace, mode)
+	fmt.Printf("│ 🆕 [NEW] Created new Claude process for workspace: %s (mode=%s, sessionID=%s)\n", workspace, mode, cliSessionID)
 
 	return runner, false, nil
 }
@@ -241,6 +254,7 @@ func (m *SubAgentManager) StopAllClaudeRunners() {
 		runner.Stop()
 	}
 	m.claudeRunners = make(map[string]*ClaudeRunner)
+	// 注意：workspaceSessionIDs 不清除，保持 sessionID 持久化以便后续复用
 }
 
 // SetExistingWorkspace 设置现有工作区（用于在现有项目上进行开发）

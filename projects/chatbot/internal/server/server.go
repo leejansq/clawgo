@@ -488,9 +488,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSessionDetail 处理 /api/session/{sessionKey}
+// handleSessionDetail 处理 /api/sessions/{sessionKey}
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/session/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 
 	// 匹配消息路由
 	if strings.HasSuffix(path, "/messages") {
