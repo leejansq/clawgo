@@ -29,9 +29,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/ark"
@@ -184,16 +186,16 @@ func NewSubAgentManager(cm model.ChatModel, workspaceRoot string, maxDepth int) 
 		maxDepth = 5
 	}
 	return &SubAgentManager{
-		sessions:      make(map[string]*SubAgentInfo),
-		cm:            cm,
-		workspaceRoot: workspaceRoot,
-		resultStore:   NewResultStore(workspaceRoot),
-		depth:         0,
-		maxDepth:      maxDepth,
-		useClaudeCLI:  os.Getenv("USE_CLAUDE_CLI") == "true",
-		claudeRunners: make(map[string]*ClaudeRunner),         // Claude CLI 进程池
-		workspaceSessionIDs: make(map[string]string),           // Workspace 对应的 sessionID (持久化)
-		announceChan:  make(chan *Announce, 10),               // Announce 通道
+		sessions:            make(map[string]*SubAgentInfo),
+		cm:                  cm,
+		workspaceRoot:       workspaceRoot,
+		resultStore:         NewResultStore(workspaceRoot),
+		depth:               0,
+		maxDepth:            maxDepth,
+		useClaudeCLI:        os.Getenv("USE_CLAUDE_CLI") == "true",
+		claudeRunners:       make(map[string]*ClaudeRunner), // Claude CLI 进程池
+		workspaceSessionIDs: make(map[string]string),        // Workspace 对应的 sessionID (持久化)
+		announceChan:        make(chan *Announce, 10),       // Announce 通道
 	}
 }
 
@@ -1010,7 +1012,7 @@ func (m *SubAgentManager) executeWithClaudeCLI(ctx context.Context, sessionKey s
 	fmt.Printf("│ 🔥 [CLAUDE CLI] System prompt: %s\n", systemPrompt[:min(100, len(systemPrompt))])
 
 	// 创建带超时的上下文
-	subCtx, cancel := context.WithTimeout(ctx, config.Timeout)
+	subCtx, cancel := context.WithTimeout(ctx, config.Timeout*100)
 	defer cancel()
 
 	// 获取或创建 Claude Runner (session 模式会复用已有进程)
@@ -1209,6 +1211,13 @@ func (m *SubAgentManager) ListActiveSessions() []*SubAgentInfo {
 	return result
 }
 
+// UpdateChatModel 更新 ChatModel
+func (m *SubAgentManager) UpdateChatModel(cm model.ChatModel) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cm = cm
+}
+
 // GetStats 获取统计
 func (m *SubAgentManager) GetStats() (total, pending, running, completed, errors int) {
 	m.mu.RLock()
@@ -1318,6 +1327,13 @@ func buildMainAgentSystemPrompt() string {
 ## Your Capabilities
 You can spawn sub-agents to handle complex tasks. Each sub-agent works in its own workspace.
 
+## Existing Workspace Mode
+When user provides --workspace flag:
+- User has an EXISTING project directory
+- The workspace path is automatically provided to all sub-agents
+- You do NOT need to pass workspace parameter
+- Sub-agents will work INSIDE that existing directory automatically
+
 ## Sub-agent Workflow with Review (React Pattern)
 
 ### Step 1: Spawn
@@ -1368,6 +1384,19 @@ Once satisfied with the result, present the final solution to the user.
 6. Review the sub-agent result BEFORE responding to user
 7. If issues found, spawn another sub-agent to fix them (max 3 iterations)
 
+## When to Ask User (IMPORTANT!)
+STOP and ask the user for clarification when:
+- Task is vague or ambiguous (e.g., "开发一个网站" without specifics)
+- Missing required information (tech stack, design, features, etc.)
+- User asks for something impossible or unclear
+- You need creative decisions (UI design, architecture choices)
+- User preferences not specified
+
+When asking user:
+- Return a text response WITHOUT calling any tools
+- Clearly state what information you need
+- DO NOT spawn sub-agents just to ask questions
+
 ## Tools
 
 ### spawn_subagent
@@ -1378,8 +1407,9 @@ Parameters:
 - instruction: Optional custom instructions
 - timeoutSec: Timeout in seconds (default 600)
 - cleanup: 'delete' or 'keep' workspace
+- workspace: Use ONLY when user provides --workspace flag. Must use the EXACT path provided by user. NEVER generate your own path.
 
-Returns: sessionKey, status="accepted", note
+Returns: sessionKey, status="accepted", workspacePath, note
 
 ### get_subagent_result
 Get sub-agent result. MUST be called after spawn_subagent.
@@ -1428,11 +1458,13 @@ func main() {
 	var maxDepth int
 	var workspace string
 	var webhook string
+	var ttyMode bool
 	flag.StringVar(&task, "task", "", "the task")
 	flag.IntVar(&timeout, "timeout", 600, "sub-agent timeout in seconds")
 	flag.IntVar(&maxDepth, "max-depth", 5, "max nesting depth")
 	flag.StringVar(&workspace, "workspace", "", "existing workspace directory (for developing on existing projects)")
 	flag.StringVar(&webhook, "webhook", "", "webhook URL to send task completion notification")
+	flag.BoolVar(&ttyMode, "tty", false, "enable TTY interactive mode (interactive prompt after task completion)")
 	flag.Parse()
 
 	// 验证 workspace 如果指定
@@ -1488,7 +1520,6 @@ Write complete code files.`
 				"instruction": {Type: "string", Desc: "Custom instructions"},
 				"timeoutSec":  {Type: "integer", Desc: "Timeout in seconds"},
 				"cleanup":     {Type: "string", Desc: "Cleanup: delete/keep"},
-				"workspace":   {Type: "string", Desc: "Existing workspace path to use (optional, for continuing work in same workspace)"},
 			}),
 		},
 		func(ctx context.Context, input *SpawnRequest) (*SpawnResponse, error) {
@@ -1517,13 +1548,17 @@ Write complete code files.`
 			}
 
 			// 异步 Spawn (立即返回)
-			// 如果传递了 workspace 参数，使用已存在的 workspace
+			// 当 --workspace 指定时，始终使用该目录，不依赖 LLM 传递
 			var result *SubAgentInfo
-			fmt.Printf("│ 📁 [SPAWN] Input workspace: '%s'\n", input.Workspace)
-			if input.Workspace != "" {
-				fmt.Printf("│ 📁 [SPAWN] Using EXISTING workspace: %s\n", input.Workspace)
-				result = manager.SpawnAsyncInWorkspace(ctx, config, input.Workspace)
+			existingWS := manager.GetExistingWorkspace()
+			fmt.Printf("│ 📁 [SPAWN] Existing workspace from --workspace: '%s'\n", existingWS)
+
+			if existingWS != "" {
+				// 使用命令行指定的 workspace
+				fmt.Printf("│ 📁 [SPAWN] Using --workspace directory: %s\n", existingWS)
+				result = manager.SpawnAsyncInWorkspace(ctx, config, existingWS)
 			} else {
+				// 没有指定 workspace，创建新的
 				fmt.Printf("│ 📁 [SPAWN] Creating NEW workspace\n")
 				result = manager.SpawnAsync(ctx, config)
 			}
@@ -2123,6 +2158,10 @@ Write complete code files.`
 
 			iterationCount++
 
+			if msg.ResponseMeta != nil {
+				fmt.Printf("│ 💭 [ITERATION %d] Model FinishReason: %s\n", iterationCount, msg.ResponseMeta.FinishReason)
+			}
+
 			// 打印主 agent 的思考内容（如果有）
 			if msg.Content != "" {
 				contentStr := msg.Content
@@ -2135,7 +2174,7 @@ Write complete code files.`
 			fmt.Printf("📍 [ITERATION %d] ToolCalls: %d\n", iterationCount, len(msg.ToolCalls))
 
 			// 超过最大迭代次数，强制结束
-			if iterationCount >= 30 {
+			if iterationCount >= 300 {
 				fmt.Printf("⚠️  [MAX ITERATIONS] Reached limit, ending...\n")
 				return compose.END, nil
 			}
@@ -2173,11 +2212,21 @@ Write complete code files.`
 	fmt.Println()
 	fmt.Printf("📝 [Task] %s\n\n", task)
 
+	historyMessages := []*schema.Message{}
+	if ttyMode {
+		var quit bool
+		task, quit = runTTYInteractive(ctx, historyMessages, manager)
+		if quit {
+			return
+		}
+	}
+loop:
+	logMessages(historyMessages)
 	// 运行
 	result, err := graph.Invoke(ctx, map[string]any{
 		"task":    buildMainAgentUserPrompt(task),
-		"history": []*schema.Message{},
-	})
+		"history": historyMessages,
+	}, compose.WithRuntimeMaxSteps(100))
 	if err != nil {
 		sendWebhook(webhook, task, manager, workspaceRoot, startTime)
 		fmt.Fprintf(os.Stderr, "\n❌ Error: %v\n", err)
@@ -2194,12 +2243,74 @@ Write complete code files.`
 	}
 
 	printSummary(manager)
+	historyMessages = append(historyMessages, result)
+
+	if ttyMode {
+		var (
+			quit  bool
+			reply string
+		)
+		reply, quit = runTTYInteractive(ctx, historyMessages, manager)
+		if !quit {
+			historyMessages = append(historyMessages, &schema.Message{
+				Role:    schema.User,
+				Content: reply,
+			})
+			goto loop
+		}
+	}
 
 	// 停止所有 Claude CLI 进程 (session 模式)
 	manager.StopAllClaudeRunners()
 
 	// 发送 webhook 通知
 	sendWebhook(webhook, task, manager, workspaceRoot, startTime)
+}
+
+func logMessages(messages []*schema.Message) {
+	if len(messages) == 0 {
+		fmt.Println("[logMessages] No messages")
+		return
+	}
+
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+	fmt.Printf("  Total Messages: %d\n", len(messages))
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+
+	for i, msg := range messages {
+		role := msg.Role
+		if role == "" {
+			role = "unknown"
+		}
+
+		content := msg.Content
+		if len(content) > 200 {
+			content = content[:200] + "..."
+		}
+		content = strings.ReplaceAll(content, "\n", " ")
+
+		toolCalls := ""
+		if len(msg.ToolCalls) > 0 {
+			var names []string
+			for _, tc := range msg.ToolCalls {
+				names = append(names, tc.Function.Name)
+			}
+			toolCalls = fmt.Sprintf(" [Tools: %s]", strings.Join(names, ", "))
+		}
+
+		finishReason := ""
+		if msg.ResponseMeta != nil && msg.ResponseMeta.FinishReason != "" {
+			finishReason = fmt.Sprintf(" [FinishReason: %s]", msg.ResponseMeta.FinishReason)
+		}
+
+		fmt.Printf("\n[%d] Role: %s%s%s\n", i+1, role, toolCalls, finishReason)
+		if content != "" {
+			fmt.Printf("    Content: %s\n", content)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
 }
 
 // ============================================================================
@@ -2295,6 +2406,142 @@ func printSummary(manager *SubAgentManager) {
 
 	fmt.Printf("📈 Total: %d | Pending: %d | Running: %d | Completed: %d | Errors: %d\n",
 		total, pending, running, completed, errors)
+}
+
+// runTTYInteractive 进入 TTY 交互模式
+func runTTYInteractive(ctx context.Context, history []*schema.Message, manager *SubAgentManager) (string, bool) {
+	scanner := bufio.NewScanner(os.Stdin)
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+	fmt.Println("                         TTY Interactive Mode")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+	fmt.Println("  Commands:")
+	fmt.Println("    /continue - 继续当前任务，请求用户补充信息后继续执行")
+	fmt.Println("    /new      - 开始新任务")
+	fmt.Println("    /status   - 查看所有 sub-agent 状态")
+	fmt.Println("    /sessions - 列出所有会话")
+	fmt.Println("    /clear   - 清屏")
+	fmt.Println("    /quit    - 退出程序")
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+	fmt.Println()
+
+	for {
+		fmt.Print("> ")
+
+		inputReady := make(chan struct{})
+		var inputLine string
+
+		go func() {
+			if scanner.Scan() {
+				inputLine = scanner.Text()
+			}
+			close(inputReady)
+		}()
+
+		select {
+		case <-sigChan:
+			fmt.Println("\nReceived interrupt, shutting down...")
+			return "", true
+		case <-inputReady:
+			if scanner.Err() != nil {
+				return "", true
+			}
+		}
+
+		line := strings.TrimSpace(inputLine)
+		if line == "" {
+			continue
+		}
+
+		switch line {
+		case "/quit", "/exit", "q":
+			fmt.Println("Goodbye!")
+			return "", true
+
+		case "/status":
+			printSummary(manager)
+			continue
+
+		case "/sessions":
+			sessions := manager.ListActiveSessions()
+			if len(sessions) == 0 {
+				fmt.Println("No active sessions.")
+				continue
+			}
+			for _, s := range sessions {
+				fmt.Printf("  [%s] %s - %s (%.2fs)\n", s.SessionKey[:8], s.Label, s.Status, float64(s.DurationMs)/1000)
+			}
+			continue
+
+		case "/clear":
+			fmt.Print("\033[2J")
+			fmt.Print("\033[H")
+			continue
+		case "/new":
+			history = []*schema.Message{}
+			continue
+		// case "/new":
+		// 	fmt.Print("\nEnter new task: ")
+		// 	if !scanner.Scan() {
+		// 		continue
+		// 	}
+		// 	newTask := scanner.Text()
+		// 	if newTask != "" {
+		// 		fmt.Printf("\nStarting new task: %s\n", newTask)
+		// 		runNewTask(ctx, manager, newTask, workspaceRoot)
+		// 	}
+		// 	continue
+
+		// case "/continue":
+		// 	if lastResult != nil && lastResult.Content != "" {
+		// 		fmt.Println("\nLast result:")
+		// 		fmt.Println(lastResult.Content)
+		// 	}
+		// 	fmt.Print("\nWhat additional information would you like to provide? ")
+		// 	if !scanner.Scan() {
+		// 		continue
+		// 	}
+		// 	additionalInfo := scanner.Text()
+		// 	if additionalInfo != "" {
+		// 		fmt.Printf("\nContinuing task with additional info...\n")
+		// 		continueTask := fmt.Sprintf("Continue from previous task. Additional information from user: %s", additionalInfo)
+		// 		runNewTask(ctx, manager, continueTask, workspaceRoot)
+		// 	}
+		// 	continue
+
+		default:
+			// 默认当作新任务处理
+			if len(history) == 0 {
+				fmt.Printf("\nStarting new task: %s\n", line)
+			}
+			return line, false
+		}
+	}
+}
+
+// runNewTask 运行新任务
+func runNewTask(ctx context.Context, manager *SubAgentManager, task string, workspaceRoot string) {
+	cm, err := newChatModel(ctx)
+	if err != nil {
+		fmt.Printf("Error creating chat model: %v\n", err)
+		return
+	}
+
+	manager.UpdateChatModel(cm)
+
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
+	fmt.Printf("📝 [New Task] %s\n\n", task)
+
+	// 构建 Graph 并执行
+	// (此处简化，实际应复用原有的 graph 构建逻辑)
+	fmt.Println("Task completed. Use /status to check results.")
+	fmt.Println()
 }
 
 // TaskWebhookPayload 任务完成后的 webhook 负载
