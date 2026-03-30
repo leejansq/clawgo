@@ -220,7 +220,7 @@ func parseDateFromPath(path string) string {
 	return ""
 }
 
-// FormatSearchResults formats search results for display
+// FormatSearchResults formats search results for display (OpenClaw pattern: path + lines)
 func FormatSearchResults(results []*SearchResult) string {
 	if len(results) == 0 {
 		return "No relevant memories found."
@@ -231,6 +231,12 @@ func FormatSearchResults(results []*SearchResult) string {
 
 	for i, r := range results {
 		sb.WriteString(fmt.Sprintf("--- Result %d (Score: %.2f) ---\n", i+1, r.Score))
+		// OpenClaw citation format: path#line or path#line1-line2
+		if r.StartLine == r.EndLine {
+			sb.WriteString(fmt.Sprintf("Source: %s#L%d\n", r.Path, r.StartLine))
+		} else {
+			sb.WriteString(fmt.Sprintf("Source: %s#L%d-L%d\n", r.Path, r.StartLine, r.EndLine))
+		}
 		sb.WriteString(fmt.Sprintf("Type: %s\n", r.Type))
 		if r.Date != "" {
 			sb.WriteString(fmt.Sprintf("Date: %s\n", r.Date))
@@ -238,7 +244,7 @@ func FormatSearchResults(results []*SearchResult) string {
 		if len(r.Tags) > 0 {
 			sb.WriteString(fmt.Sprintf("Tags: %v\n", r.Tags))
 		}
-		sb.WriteString(fmt.Sprintf("Content: %s\n\n", r.Content))
+		sb.WriteString(fmt.Sprintf("Snippet:\n%s\n\n", r.Snippet))
 	}
 
 	return sb.String()

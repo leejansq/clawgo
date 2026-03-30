@@ -70,7 +70,7 @@ func newMemoryStore(ctx context.Context, cfg *Config) (*memoryStore, error) {
 	}, nil
 }
 
-// Write writes content to memory
+// Write writes content to memory (OpenClaw pattern: file first, then index path+lines in vector DB)
 func (s *memoryStore) Write(ctx context.Context, content string, meta MemoryMeta) error {
 	if meta.Type == "" {
 		meta.Type = MemoryTypeShortTerm
@@ -81,12 +81,43 @@ func (s *memoryStore) Write(ctx context.Context, content string, meta MemoryMeta
 		meta.Date = time.Now().Format("2006-01-02")
 	}
 
-	// Chunk the content (meta is not used in chunking, per openclaw's chunkMarkdown)
+	// Determine file path for this memory
+	var filePath string
+	if meta.Type == MemoryTypeLongTerm {
+		filePath = s.longTermFile
+	} else {
+		filePath = filepath.Join(s.shortTermDir, meta.Date+".md")
+	}
+
+	// Step 1: Write content to file FIRST (OpenClaw pattern)
+	if meta.Type == MemoryTypeShortTerm {
+		// Append to short-term memory file
+		if err := s.appendToShortTermFile(ctx, filePath, content); err != nil {
+			return fmt.Errorf("failed to write short-term file: %w", err)
+		}
+	} else {
+		// Write/overwrite long-term memory file
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write long-term file: %w", err)
+		}
+	}
+
+	// Step 2: Chunk content and store path+lines in vector DB (content stays in file)
 	chunks := s.chunkContent(content)
 
-	// Write chunks to vector store
+	// Determine relative path for indexing (OpenClaw pattern: "MEMORY.md" or "memory/YYYY-MM-DD.md")
+	var relPath string
+	if meta.Type == MemoryTypeLongTerm {
+		relPath = "MEMORY.md"
+	} else {
+		relPath = "memory/" + meta.Date + ".md"
+	}
+
 	for _, chunk := range chunks {
 		err := s.vectorStore.AddChunk(ctx, chunk.Text, ChunkMeta{
+			Path:       relPath,
+			StartLine:  chunk.StartLine,
+			EndLine:    chunk.EndLine,
 			MemoryType: meta.Type,
 			Date:       meta.Date,
 			Source:     meta.Source,
@@ -98,12 +129,24 @@ func (s *memoryStore) Write(ctx context.Context, content string, meta MemoryMeta
 		}
 	}
 
-	// Also write to file for short-term memory
-	if meta.Type == MemoryTypeShortTerm {
-		return s.writeShortTermFile(ctx, meta.Date, content)
-	}
-
 	return nil
+}
+
+// appendToShortTermFile appends content to a short-term memory file
+func (s *memoryStore) appendToShortTermFile(ctx context.Context, filePath string, content string) error {
+	// Add timestamp header
+	timestamp := time.Now().Format(time.RFC3339)
+	entry := fmt.Sprintf("\n## %s\n\n%s\n", timestamp, content)
+
+	// Append to existing file or create new
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close()
+
+	_, err = f.WriteString(entry)
+	return err
 }
 
 // lineEntry represents a line with its line number
@@ -241,25 +284,6 @@ func hashText(value string) string {
 	return fmt.Sprintf("%x", h)
 }
 
-// writeShortTermFile writes content to a short-term memory file
-func (s *memoryStore) writeShortTermFile(ctx context.Context, date, content string) error {
-	filePath := filepath.Join(s.shortTermDir, date+".md")
-
-	// Append to existing file or create new
-	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer f.Close()
-
-	// Add timestamp header
-	timestamp := time.Now().Format(time.RFC3339)
-	entry := fmt.Sprintf("\n## %s\n\n%s\n", timestamp, content)
-
-	_, err = f.WriteString(entry)
-	return err
-}
-
 // Search searches memory for relevant content
 func (s *memoryStore) Search(ctx context.Context, query string, opts ...SearchOption) ([]*SearchResult, error) {
 	options := DefaultSearchOptions()
@@ -298,8 +322,12 @@ func (s *memoryStore) Search(ctx context.Context, query string, opts ...SearchOp
 		}
 
 		for _, r := range vectorResults {
+			snippet := s.readSnippetFromFile(r.Path, r.StartLine, r.EndLine)
 			results = append(results, &SearchResult{
-				Content:    r.Content,
+				Path:       r.Path,
+				StartLine:  r.StartLine,
+				EndLine:    r.EndLine,
+				Snippet:    snippet,
 				Score:      r.Score,
 				MemoryMeta: convertMeta(r.Meta),
 				ChunkID:    r.ID,
@@ -313,8 +341,12 @@ func (s *memoryStore) Search(ctx context.Context, query string, opts ...SearchOp
 		}
 
 		for _, r := range bm25Results {
+			snippet := s.readSnippetFromFile(r.Path, r.StartLine, r.EndLine)
 			results = append(results, &SearchResult{
-				Content:    r.Content,
+				Path:       r.Path,
+				StartLine:  r.StartLine,
+				EndLine:    r.EndLine,
+				Snippet:    snippet,
 				Score:      r.Score,
 				MemoryMeta: convertMeta(r.Meta),
 				ChunkID:    r.ID,
@@ -338,6 +370,49 @@ func (s *memoryStore) Search(ctx context.Context, query string, opts ...SearchOp
 	}
 
 	return results, nil
+}
+
+// readSnippetFromFile reads a specific line range from a memory file (OpenClaw pattern)
+// path is like "MEMORY.md" or "memory/2026-03-30.md"
+func (s *memoryStore) readSnippetFromFile(path string, fromLine, toLine int) string {
+	// Construct full file path
+	var filePath string
+	if path == "MEMORY.md" {
+		filePath = s.longTermFile
+	} else if strings.HasPrefix(path, "memory/") {
+		// path is like "memory/2026-03-30.md"
+		date := strings.TrimSuffix(strings.TrimPrefix(path, "memory/"), ".md")
+		filePath = filepath.Join(s.shortTermDir, date+".md")
+	} else {
+		// Fallback - assume it's a full path or MEMORY.md
+		filePath = filepath.Join(s.config.BaseDir, path)
+	}
+
+	// Read file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	// Convert to 0-indexed
+	startIdx := fromLine - 1
+	endIdx := toLine
+
+	// Bounds check
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+	if startIdx >= endIdx {
+		return ""
+	}
+
+	// Extract lines and rejoin
+	return strings.Join(lines[startIdx:endIdx], "\n")
 }
 
 // mergeResults merges vector and BM25 search results
@@ -368,8 +443,14 @@ func (s *memoryStore) mergeResults(ctx context.Context, vectorResults []*VectorS
 		normalizedScore := r.Score / maxVectorScore
 		weightedScore := normalizedScore * vectorWeight
 
+		// Read snippet from file
+		snippet := s.readSnippetFromFile(r.Path, r.StartLine, r.EndLine)
+
 		merged[r.ID] = &SearchResult{
-			Content:    r.Content,
+			Path:       r.Path,
+			StartLine:  r.StartLine,
+			EndLine:    r.EndLine,
+			Snippet:    snippet,
 			Score:      weightedScore,
 			MemoryMeta: convertMeta(r.Meta),
 			ChunkID:    r.ID,
@@ -380,11 +461,17 @@ func (s *memoryStore) mergeResults(ctx context.Context, vectorResults []*VectorS
 		normalizedScore := r.Score / maxBM25Score
 		weightedScore := normalizedScore * bm25Weight
 
+		// Read snippet from file
+		snippet := s.readSnippetFromFile(r.Path, r.StartLine, r.EndLine)
+
 		if existing, ok := merged[r.ID]; ok {
 			existing.Score += weightedScore
 		} else {
 			merged[r.ID] = &SearchResult{
-				Content:    r.Content,
+				Path:       r.Path,
+				StartLine:  r.StartLine,
+				EndLine:    r.EndLine,
+				Snippet:    snippet,
 				Score:      weightedScore,
 				MemoryMeta: convertMeta(r.Meta),
 				ChunkID:    r.ID,
@@ -453,9 +540,9 @@ func (s *memoryStore) applyMMR(ctx context.Context, results []*SearchResult, opt
 // maxSimilarity calculates maximum similarity to selected results
 func (s *memoryStore) maxSimilarity(result *SearchResult, selected []*SearchResult) float64 {
 	maxSim := 0.0
-	for _, s := range selected {
+	for _, sel := range selected {
 		// Simple word overlap similarity
-		sim := textSimilarity(result.Content, s.Content)
+		sim := textSimilarity(result.Snippet, sel.Snippet)
 		if sim > maxSim {
 			maxSim = sim
 		}

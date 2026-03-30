@@ -77,7 +77,10 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, limit int, f
 		weightedScore := normalizedScore * vectorWeight
 
 		merged[r.ID] = &SearchResult{
-			Content:    r.Content,
+			Path:       r.Path,
+			StartLine:  r.StartLine,
+			EndLine:    r.EndLine,
+			Snippet:    "", // Snippet will be filled by caller
 			Score:      weightedScore,
 			MemoryMeta: convertMeta(r.Meta),
 			ChunkID:    r.ID,
@@ -92,7 +95,10 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, limit int, f
 			existing.Score += weightedScore
 		} else {
 			merged[r.ID] = &SearchResult{
-				Content:    r.Content,
+				Path:       r.Path,
+				StartLine:  r.StartLine,
+				EndLine:    r.EndLine,
+				Snippet:    "", // Snippet will be filled by caller
 				Score:      weightedScore,
 				MemoryMeta: convertMeta(r.Meta),
 				ChunkID:    r.ID,
@@ -218,7 +224,7 @@ func sortBySearchResultScore(results []*SearchResult) {
 func maxTextSimilarity(result *SearchResult, selected []*SearchResult) float64 {
 	maxSim := 0.0
 	for _, s := range selected {
-		sim := textSimilarity(result.Content, s.Content)
+		sim := textSimilarityScore(result.Snippet, s.Snippet)
 		if sim > maxSim {
 			maxSim = sim
 		}

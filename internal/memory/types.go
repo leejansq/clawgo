@@ -41,9 +41,12 @@ type MemoryMeta struct {
 	CreatedAt  time.Time   // Creation timestamp
 }
 
-// SearchResult represents a search result from memory
+// SearchResult represents a search result from memory (OpenClaw pattern: path + lines, content read from file)
 type SearchResult struct {
-	Content    string      // Matched content
+	Path       string      // File path (e.g., "MEMORY.md" or "memory/2026-03-30.md")
+	StartLine  int         // Start line number (1-indexed)
+	EndLine    int         // End line number (1-indexed)
+	Snippet    string      // Content snippet (read from file by memory_get)
 	Score      float64     // Relevance score
 	MemoryMeta            // Embedded metadata
 	ChunkID   string       // Chunk identifier

@@ -67,10 +67,13 @@ func NewVectorStore(ctx context.Context, dbPath string, embedder Embedder) (*Vec
 
 // init initializes the database schema
 func (vs *VectorStore) init(ctx context.Context) error {
+	// OpenClaw pattern: store path + line range in vector DB, content stays in file
 	schema := `
 	CREATE TABLE IF NOT EXISTS chunks (
 		id TEXT PRIMARY KEY,
-		content TEXT NOT NULL,
+		path TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
 		vector BLOB,
 		memory_type TEXT NOT NULL,
 		date TEXT,
@@ -94,6 +97,9 @@ func (vs *VectorStore) init(ctx context.Context) error {
 // ChunkMeta contains metadata for a chunk
 type ChunkMeta struct {
 	ID         string     `json:"id"`
+	Path       string     `json:"path"`        // ADD: file path (MEMORY.md or memory/YYYY-MM-DD.md)
+	StartLine  int        `json:"start_line"`  // ADD: start line (1-indexed)
+	EndLine    int        `json:"end_line"`    // ADD: end line (1-indexed)
 	MemoryType MemoryType `json:"memory_type"`
 	Date       string     `json:"date,omitempty"`
 	Source     string     `json:"source,omitempty"`
@@ -103,7 +109,7 @@ type ChunkMeta struct {
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
-// AddChunk adds a chunk to the vector store
+// AddChunk adds a chunk to the vector store (OpenClaw pattern: stores path + lines, embeds content for search)
 func (vs *VectorStore) AddChunk(ctx context.Context, content string, meta ChunkMeta) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -126,11 +132,12 @@ func (vs *VectorStore) AddChunk(ctx context.Context, content string, meta ChunkM
 
 	tagsJSON, _ := json.Marshal(meta.Tags)
 
+	// OpenClaw pattern: store path + line range, NOT content (content is in the file)
 	_, err := vs.db.Exec(`
-		INSERT INTO chunks (id, content, vector, memory_type, date, source, importance, tags, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO chunks (id, path, start_line, end_line, vector, memory_type, date, source, importance, tags, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		meta.ID, content, vectorBlob, meta.MemoryType, meta.Date, meta.Source,
+		meta.ID, meta.Path, meta.StartLine, meta.EndLine, vectorBlob, meta.MemoryType, meta.Date, meta.Source,
 		meta.Importance, string(tagsJSON), meta.CreatedAt.Format(time.RFC3339), meta.UpdatedAt.Format(time.RFC3339),
 	)
 
@@ -138,6 +145,7 @@ func (vs *VectorStore) AddChunk(ctx context.Context, content string, meta ChunkM
 }
 
 // Search searches for similar chunks using vector similarity
+// OpenClaw pattern: returns path + line range, NOT content (content read from file via memory_get)
 func (vs *VectorStore) Search(ctx context.Context, query string, limit int, filter Filter) ([]*VectorSearchResult, error) {
 	if vs.embedder == nil {
 		return nil, fmt.Errorf("embedder not configured")
@@ -154,9 +162,9 @@ func (vs *VectorStore) Search(ctx context.Context, query string, limit int, filt
 
 	queryVector := vectors[0]
 
-	// Build query
+	// Build query - OpenClaw pattern: SELECT path, start_line, end_line (no content)
 	queryBuilder := `
-		SELECT id, content, vector, memory_type, date, source, importance, tags, created_at
+		SELECT id, path, start_line, end_line, vector, memory_type, date, source, importance, tags, created_at
 		FROM chunks WHERE 1=1
 	`
 
@@ -197,10 +205,10 @@ func (vs *VectorStore) Search(ctx context.Context, query string, limit int, filt
 
 	var results []*VectorSearchResult
 	for rows.Next() {
-		var id, content, vectorBlob, memoryType, date, source, tagsStr, createdAtStr string
-		var importance int
+		var id, path, vectorBlob, memoryType, date, source, tagsStr, createdAtStr string
+		var startLine, endLine, importance int
 
-		err := rows.Scan(&id, &content, &vectorBlob, &memoryType, &date, &source, &importance, &tagsStr, &createdAtStr)
+		err := rows.Scan(&id, &path, &startLine, &endLine, &vectorBlob, &memoryType, &date, &source, &importance, &tagsStr, &createdAtStr)
 		if err != nil {
 			continue
 		}
@@ -225,9 +233,14 @@ func (vs *VectorStore) Search(ctx context.Context, query string, limit int, filt
 		results = append(results, &VectorSearchResult{
 			ID:    id,
 			Score: score,
-			Content: content,
+			Path:  path,
+			StartLine: startLine,
+			EndLine: endLine,
 			Meta: ChunkMeta{
 				ID:         id,
+				Path:       path,
+				StartLine:  startLine,
+				EndLine:    endLine,
 				MemoryType: MemoryType(memoryType),
 				Date:       date,
 				Source:     source,
@@ -249,12 +262,15 @@ func (vs *VectorStore) Search(ctx context.Context, query string, limit int, filt
 	return results, nil
 }
 
-// VectorSearchResult represents a vector search result
+// VectorSearchResult represents a vector search result (OpenClaw pattern: path + lines, no content)
 type VectorSearchResult struct {
-	ID      string
-	Score   float64
-	Content string
-	Meta    ChunkMeta
+	ID        string
+	Score     float64
+	Path      string    // ADD: file path (content is read from file)
+	StartLine int       // ADD: start line (1-indexed)
+	EndLine   int       // ADD: end line (1-indexed)
+	Meta      ChunkMeta
+	// Content is NOT stored - read from file via memory_get
 }
 
 // Filter contains filter options for search
@@ -266,14 +282,16 @@ type Filter struct {
 }
 
 // BM25Search performs BM25 keyword search
+// OpenClaw pattern: since content is not in DB, BM25 searches by path/line keywords
 func (vs *VectorStore) BM25Search(ctx context.Context, query string, limit int, filter Filter) ([]*BM25SearchResult, error) {
 	// Simple BM25-like implementation using SQL LIKE
+	// OpenClaw pattern: since content is not stored, we store path keywords
 	// For production, consider using a proper full-text search library
 
 	keywords := strings.Fields(strings.ToLower(query))
 
 	queryBuilder := `
-		SELECT id, content, memory_type, date, source, importance, tags, created_at
+		SELECT id, path, start_line, end_line, memory_type, date, source, importance, tags, created_at
 		FROM chunks WHERE 1=1
 	`
 
@@ -297,11 +315,11 @@ func (vs *VectorStore) BM25Search(ctx context.Context, query string, limit int, 
 		queryBuilder += fmt.Sprintf(" AND date IN (%s)", strings.Join(placeholders, ","))
 	}
 
-	// Add keyword search conditions
+	// Add keyword search conditions for path
 	if len(keywords) > 0 {
 		conditions := make([]string, len(keywords))
 		for i, kw := range keywords {
-			conditions[i] = "LOWER(content) LIKE ?"
+			conditions[i] = "LOWER(path) LIKE ?"
 			args = append(args, "%"+kw+"%")
 		}
 		queryBuilder += " AND (" + strings.Join(conditions, " OR ") + ")"
@@ -315,16 +333,16 @@ func (vs *VectorStore) BM25Search(ctx context.Context, query string, limit int, 
 
 	var results []*BM25SearchResult
 	for rows.Next() {
-		var id, content, memoryType, date, source, tagsStr, createdAtStr string
-		var importance int
+		var id, path, memoryType, date, source, tagsStr, createdAtStr string
+		var startLine, endLine, importance int
 
-		err := rows.Scan(&id, &content, &memoryType, &date, &source, &importance, &tagsStr, &createdAtStr)
+		err := rows.Scan(&id, &path, &startLine, &endLine, &memoryType, &date, &source, &importance, &tagsStr, &createdAtStr)
 		if err != nil {
 			continue
 		}
 
-		// Calculate simple keyword match score
-		score := calculateKeywordScore(content, keywords)
+		// Calculate simple keyword match score on path
+		score := calculateKeywordScore(path, keywords)
 
 		var tags []string
 		json.Unmarshal([]byte(tagsStr), &tags)
@@ -332,11 +350,16 @@ func (vs *VectorStore) BM25Search(ctx context.Context, query string, limit int, 
 		createdAt, _ := time.Parse(time.RFC3339, createdAtStr)
 
 		results = append(results, &BM25SearchResult{
-			ID:      id,
-			Score:   score,
-			Content: content,
+			ID:    id,
+			Score: score,
+			Path:  path,
+			StartLine: startLine,
+			EndLine: endLine,
 			Meta: ChunkMeta{
 				ID:         id,
+				Path:       path,
+				StartLine:  startLine,
+				EndLine:    endLine,
 				MemoryType: MemoryType(memoryType),
 				Date:       date,
 				Source:     source,
@@ -358,12 +381,15 @@ func (vs *VectorStore) BM25Search(ctx context.Context, query string, limit int, 
 	return results, nil
 }
 
-// BM25SearchResult represents a BM25 search result
+// BM25SearchResult represents a BM25 search result (OpenClaw pattern: path + lines, no content)
 type BM25SearchResult struct {
-	ID      string
-	Score   float64
-	Content string
-	Meta    ChunkMeta
+	ID        string
+	Score     float64
+	Path      string    // ADD: file path
+	StartLine int       // ADD: start line
+	EndLine   int       // ADD: end line
+	Meta      ChunkMeta
+	// Content is NOT stored - read from file via memory_get
 }
 
 // DeleteChunksByDate deletes chunks for a specific date
