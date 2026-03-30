@@ -18,6 +18,7 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,12 +81,12 @@ func (s *memoryStore) Write(ctx context.Context, content string, meta MemoryMeta
 		meta.Date = time.Now().Format("2006-01-02")
 	}
 
-	// Chunk the content
-	chunks := s.chunkContent(content, meta)
+	// Chunk the content (meta is not used in chunking, per openclaw's chunkMarkdown)
+	chunks := s.chunkContent(content)
 
 	// Write chunks to vector store
 	for _, chunk := range chunks {
-		err := s.vectorStore.AddChunk(ctx, chunk, ChunkMeta{
+		err := s.vectorStore.AddChunk(ctx, chunk.Text, ChunkMeta{
 			MemoryType: meta.Type,
 			Date:       meta.Date,
 			Source:     meta.Source,
@@ -105,11 +106,25 @@ func (s *memoryStore) Write(ctx context.Context, content string, meta MemoryMeta
 	return nil
 }
 
-// chunkContent splits content into chunks
-func (s *memoryStore) chunkContent(content string, meta MemoryMeta) []string {
-	chunkSize := s.config.ChunkSize
-	if chunkSize <= 0 {
-		chunkSize = 512
+// lineEntry represents a line with its line number
+type lineEntry struct {
+	line   string
+	lineNo int
+}
+
+// MemoryChunk represents a chunk with line information, matching openclaw's MemoryChunk
+type MemoryChunk struct {
+	StartLine int
+	EndLine   int
+	Text      string
+	Hash      string
+}
+
+// chunkContent splits content into chunks, matching openclaw's chunkMarkdown logic
+func (s *memoryStore) chunkContent(content string) []MemoryChunk {
+	tokens := s.config.ChunkSize
+	if tokens <= 0 {
+		tokens = 512
 	}
 
 	overlap := s.config.ChunkOverlap
@@ -117,108 +132,113 @@ func (s *memoryStore) chunkContent(content string, meta MemoryMeta) []string {
 		overlap = 50
 	}
 
-	// If content is small enough, return as single chunk
-	if len(content) <= chunkSize {
-		return []string{content}
+	// maxChars = max(32, tokens * 4), 1 token ≈ 4 chars
+	maxChars := tokens * 4
+	if maxChars < 32 {
+		maxChars = 32
 	}
 
-	// Simple chunking by sentences or paragraphs
-	var chunks []string
-	paragraphs := strings.Split(content, "\n\n")
+	// overlap in chars: overlap * 4
+	overlapChars := overlap * 4
+	if overlapChars < 0 {
+		overlapChars = 0
+	}
 
-	var currentChunk strings.Builder
-	currentLen := 0
+	lines := strings.Split(content, "\n")
+	if len(lines) == 0 {
+		return []MemoryChunk{}
+	}
 
-	for _, para := range paragraphs {
-		para = strings.TrimSpace(para)
-		if para == "" {
-			continue
+	var chunks []MemoryChunk
+	var current []lineEntry
+	currentChars := 0
+
+	flush := func() {
+		if len(current) == 0 {
+			return
 		}
-
-		paraLen := len(para)
-
-		// If single paragraph exceeds chunk size, split by sentences
-		if paraLen > chunkSize {
-			if currentLen > 0 {
-				chunks = append(chunks, currentChunk.String())
-				currentChunk.Reset()
-				currentLen = 0
+		firstEntry := current[0]
+		lastEntry := current[len(current)-1]
+		if firstEntry.line == "" && lastEntry.line == "" && len(current) == 1 {
+			return
+		}
+		// Build text by joining lines with \n
+		var text strings.Builder
+		for i, entry := range current {
+			if i > 0 {
+				text.WriteString("\n")
 			}
-			chunks = append(chunks, s.splitBySentences(para, chunkSize, overlap)...)
-			continue
+			text.WriteString(entry.line)
 		}
+		chunkText := text.String()
+		chunks = append(chunks, MemoryChunk{
+			StartLine: firstEntry.lineNo,
+			EndLine:   lastEntry.lineNo,
+			Text:      chunkText,
+			Hash:      hashText(chunkText),
+		})
+	}
 
-		// Check if adding this paragraph would exceed chunk size
-		if currentLen+paraLen+2 > chunkSize {
-			if currentLen > 0 {
-				chunks = append(chunks, currentChunk.String())
-				// Keep overlap
-				if overlap > 0 && currentLen > overlap {
-					overlapText := currentChunk.String()[currentLen-overlap:]
-					currentChunk.Reset()
-					currentChunk.WriteString(overlapText)
-					currentLen = len(overlapText)
-				} else {
-					currentChunk.Reset()
-					currentLen = 0
+	carryOverlap := func() {
+		if overlapChars <= 0 || len(current) == 0 {
+			current = nil
+			currentChars = 0
+			return
+		}
+		// Keep lines from the end until we have enough overlap chars
+		acc := 0
+		kept := make([]lineEntry, 0)
+		for i := len(current) - 1; i >= 0; i-- {
+			entry := current[i]
+			acc += len(entry.line) + 1 // +1 for newline
+			kept = append([]lineEntry{entry}, kept...)
+			if acc >= overlapChars {
+				break
+			}
+		}
+		current = kept
+		currentChars = 0
+		for _, entry := range current {
+			currentChars += len(entry.line) + 1
+		}
+	}
+
+	for i, line := range lines {
+		lineNo := i + 1 // 1-indexed
+		segments := make([]string, 0)
+
+		if len(line) == 0 {
+			segments = append(segments, "")
+		} else {
+			// Split long lines into segments of maxChars (matching openclaw's line slicing)
+			for start := 0; start < len(line); start += maxChars {
+				end := start + maxChars
+				if end > len(line) {
+					end = len(line)
 				}
+				segments = append(segments, line[start:end])
 			}
 		}
 
-		if currentLen > 0 {
-			currentChunk.WriteString("\n\n")
-			currentLen += 2
+		for _, segment := range segments {
+			lineSize := len(segment) + 1 // +1 for newline
+			if currentChars+lineSize > maxChars && len(current) > 0 {
+				flush()
+				carryOverlap()
+			}
+			current = append(current, lineEntry{line: segment, lineNo: lineNo})
+			currentChars += lineSize
 		}
-		currentChunk.WriteString(para)
-		currentLen += paraLen
 	}
 
-	// Add remaining chunk
-	if currentLen > 0 {
-		chunks = append(chunks, currentChunk.String())
-	}
-
+	flush()
 	return chunks
 }
 
-// splitBySentences splits text by sentences
-func (s *memoryStore) splitBySentences(text string, chunkSize, overlap int) []string {
-	// Simple sentence splitting
-	sentences := strings.FieldsFunc(text, func(r rune) bool {
-		return r == '.' || r == '!' || r == '?'
-	})
-
-	var chunks []string
-	var current strings.Builder
-	currentLen := 0
-
-	for _, sent := range sentences {
-		sent = strings.TrimSpace(sent)
-		if sent == "" {
-			continue
-		}
-
-		sentLen := len(sent) + 1 // +1 for period
-
-		if currentLen+sentLen > chunkSize && currentLen > 0 {
-			chunks = append(chunks, current.String())
-			current.Reset()
-			currentLen = 0
-		}
-
-		if currentLen > 0 {
-			current.WriteString(". ")
-			currentLen += 2
-		}
-		current.WriteString(sent)
-		currentLen += len(sent)
-	}
-
-	if currentLen > 0 {
-		chunks = append(chunks, current.String()+".")
-	}
-
-	return chunks
+// hashText computes SHA256 hash of text, matching openclaw's hashText
+func hashText(value string) string {
+	h := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", h)
 }
 
 // writeShortTermFile writes content to a short-term memory file
