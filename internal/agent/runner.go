@@ -26,6 +26,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/leejansq/clawgo/internal/session"
 )
 
 // ClaudeRunner Claude Code CLI 进程管理器 (参考 OpenClaw 子进程执行)
@@ -40,7 +42,10 @@ type ClaudeRunner struct {
 	result     string
 	isRunning  bool
 	isStopped  bool
-	mu         sync.Mutex
+	mu         sync.RWMutex
+
+	// Session transcript (for compaction)
+	sessionStore session.SessionStore
 
 	// Session 模式专用
 	taskChan   chan string   // 任务通道
@@ -392,5 +397,78 @@ func (r *ClaudeRunner) Stop() error {
 		r.isRunning = false
 	}
 
+	return nil
+}
+
+// SetSessionStore sets the session store for transcript logging
+func (r *ClaudeRunner) SetSessionStore(store session.SessionStore) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sessionStore = store
+}
+
+// GetSessionStore returns the session store
+func (r *ClaudeRunner) GetSessionStore() session.SessionStore {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sessionStore
+}
+
+// AppendUserMessage logs a user message to the session transcript
+func (r *ClaudeRunner) AppendUserMessage(content string) error {
+	r.mu.RLock()
+	store := r.sessionStore
+	r.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+
+	_, err := store.AppendMessage("user", content)
+	return err
+}
+
+// AppendAssistantMessage logs an assistant message to the session transcript
+func (r *ClaudeRunner) AppendAssistantMessage(content string) error {
+	r.mu.RLock()
+	store := r.sessionStore
+	r.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+
+	_, err := store.AppendMessage("assistant", content)
+	return err
+}
+
+// GetSessionStats returns session statistics for compaction decisions
+func (r *ClaudeRunner) GetSessionStats() *session.SessionStats {
+	r.mu.RLock()
+	store := r.sessionStore
+	r.mu.RUnlock()
+
+	if store == nil {
+		return nil
+	}
+
+	return store.GetStats()
+}
+
+// CreateSession creates a new session transcript
+func (r *ClaudeRunner) CreateSession() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.sessionStore != nil {
+		return nil // Already has a session
+	}
+
+	store := session.NewSessionStore()
+	_, err := store.CreateSession(r.workspace)
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	r.sessionStore = store
 	return nil
 }

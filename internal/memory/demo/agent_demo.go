@@ -245,7 +245,7 @@ func memoryGet(path string, from, lines *int, store memory.MemoryStore) *ToolRes
 
 func runMemoryRecallDemo(ctx context.Context, store memory.MemoryStore) {
 	fmt.Println("\n--- Simulating Agent Memory Recall ---")
-	fmt.Println("(This shows how an OpenClaw-aligned agent would use memory tools)\n")
+	fmt.Println("(This shows how an OpenClaw-aligned agent would use memory tools)")
 
 	// Scenario 1: User asks about past work
 	runScenario(ctx, store,
