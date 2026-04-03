@@ -47,8 +47,7 @@ func NewLineEditor() *LineEditor {
 
 // ReadLine 读取一行输入
 func (e *LineEditor) ReadLine(prompt string) (string, error) {
-	fmt.Print(e.theme.PromptSymbol + " ")
-	fmt.Print(prompt + " ")
+	fmt.Print("> ")
 
 	line, err := e.reader.ReadString('\n')
 	if err != nil {
@@ -148,30 +147,20 @@ func (e *LineEditor) commandToDecision(cmd string, feedback string) (Decision, s
 	}
 }
 
-// ReadFeedback 读取多行反馈
+// ReadFeedback 读取单行反馈 (按回车结束)
 func (e *LineEditor) ReadFeedback(instruction string) (string, error) {
 	fmt.Println()
-	fmt.Println(e.theme.Heading + strings.Repeat("─", 60) + e.theme.Reset())
-	fmt.Println(e.theme.EmphasisStyle("  " + instruction))
-	fmt.Println(e.theme.Heading + strings.Repeat("─", 60) + e.theme.Reset())
-	fmt.Println(e.theme.WarningStyle("  (输入空行结束输入)"))
-	fmt.Println()
+	fmt.Println("------------------------------------------")
+	fmt.Printf("  %s\n", instruction)
+	fmt.Println("------------------------------------------")
+	fmt.Print("  > ")
 
-	var lines []string
-	for {
-		line, err := e.ReadLine("")
-		if err != nil {
-			return "", err
-		}
-
-		if line == "" {
-			break
-		}
-
-		lines = append(lines, line)
+	line, err := e.reader.ReadString('\n')
+	if err != nil {
+		return "", err
 	}
 
-	return strings.Join(lines, "\n"), nil
+	return strings.TrimSpace(line), nil
 }
 
 // CompleteCommand 补全命令 (返回匹配的命令列表)
@@ -193,22 +182,24 @@ func (e *LineEditor) CompleteCommand(prefix string) []string {
 // DisplayPrompt 显示确认提示
 func (e *LineEditor) DisplayPrompt(revisionCount int) {
 	fmt.Println()
-	fmt.Println(e.theme.Heading + strings.Repeat("═", 60) + e.theme.Reset())
+	fmt.Println("========================================")
 	if revisionCount > 0 {
 		fmt.Printf("  %s 第 %d 轮修订后确认\n", e.theme.WarningStyle("⏸"), revisionCount)
 	} else {
 		fmt.Printf("  %s 确认投放方案\n", e.theme.WarningStyle("⏸"))
 	}
-	fmt.Println(e.theme.Heading + strings.Repeat("═", 60) + e.theme.Reset())
+	fmt.Println("========================================")
 
 	// 显示命令提示
 	fmt.Println()
-	fmt.Printf("  %s\n", e.theme.CodeStyle("/yes")+" 或 "+e.theme.CodeStyle("/y")+" 批准  ")
-	fmt.Printf("  %s\n", e.theme.CodeStyle("/revise")+" 或 "+e.theme.CodeStyle("/r")+" 修订  ")
-	fmt.Printf("  %s\n", e.theme.CodeStyle("/no")+" 或 "+e.theme.CodeStyle("/n")+" 拒绝  ")
-	fmt.Printf("  %s\n", e.theme.CodeStyle("/json")+" 显示 JSON  ")
-	fmt.Printf("  %s\n", e.theme.CodeStyle("/help")+" 帮助")
+	fmt.Printf("  命令: %s - 批准  %s - 修订  %s - 拒绝  %s - JSON  %s - 帮助\n",
+		e.theme.CodeStyle("/yes"),
+		e.theme.CodeStyle("/revise"),
+		e.theme.CodeStyle("/no"),
+		e.theme.CodeStyle("/json"),
+		e.theme.CodeStyle("/help"))
 	fmt.Println()
+	fmt.Print("  > ")
 }
 
 // ClearLine 清除当前行

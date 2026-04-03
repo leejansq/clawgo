@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/compose"
@@ -224,14 +223,15 @@ func (c *Coordinator) BuildGraph(ctx context.Context) (compose.Runnable[*Workflo
 
 // RunWithGraph 使用 Graph 执行工作流
 func (c *Coordinator) RunWithGraph(ctx context.Context, product, platform, targetMarket string) (*types.WorkflowState, error) {
-	sep := strings.Repeat("=", 60)
-	sep2 := strings.Repeat("-", 40)
+	renderer := terminal.NewRenderer()
 
-	fmt.Println("\n" + sep)
-	fmt.Println("🚀 电商投流多 Agent 系统启动 (Graph Orchestration)")
-	fmt.Println(sep)
+	fmt.Println()
+	fmt.Println("========================================")
+	fmt.Println(renderer.Theme.EmphasisStyle("  🤖 电商投流多 Agent 系统"))
+	fmt.Println("========================================")
 	fmt.Printf("产品: %s | 平台: %s | 市场: %s\n", product, platform, targetMarket)
-	fmt.Println(sep + "\n")
+	fmt.Println("========================================")
+	fmt.Println()
 
 	// 构建 Graph (如果尚未构建)
 	if c.graph == nil {
@@ -252,8 +252,9 @@ func (c *Coordinator) RunWithGraph(ctx context.Context, product, platform, targe
 	}
 
 	// ========== Step 1: Agent-A 执行 ==========
-	fmt.Println("📊 [Graph] Step 1: Agent-A 市场调研与策略分析")
-	fmt.Println(sep2)
+	fmt.Println("----------------------------------------")
+	fmt.Println(renderer.Theme.HeadingStyle("  [Step 1] Agent-A: 市场调研与策略分析"))
+	fmt.Println("----------------------------------------")
 	c.state.CurrentStep = 1
 
 	plan, err := c.agentA.AnalyzeAndPlan(ctx, product, platform, targetMarket)
@@ -263,10 +264,10 @@ func (c *Coordinator) RunWithGraph(ctx context.Context, product, platform, targe
 	}
 	c.state.Plan = plan
 	wfCtx.Plan = plan
-	fmt.Printf("✅ 方案已生成: %s\n", plan.CampaignID)
-	fmt.Printf("   预期ROI: %.2f\n", plan.ROIExpectation)
-	fmt.Printf("   定向: %d-%d岁, %s\n", plan.Targeting.AgeRange[0], plan.Targeting.AgeRange[1], plan.Targeting.Gender)
-	fmt.Printf("   预算: %.2f 元/天\n\n", plan.Bid.DailyBudget)
+	fmt.Printf("  %s 方案已生成: %s\n", renderer.Theme.SuccessStyle("✔"), plan.CampaignID)
+	fmt.Printf("  预期ROI: %.2f | 定向: %d-%d岁 | 预算: %.2f元/天\n",
+		plan.ROIExpectation, plan.Targeting.AgeRange[0], plan.Targeting.AgeRange[1], plan.Bid.DailyBudget)
+	fmt.Println()
 
 	// ========== Human-in-Loop: 多轮修订循环 ==========
 	plan, confirmed, err := c.humanAgentAReviewLoop(ctx, plan, platform)
@@ -283,19 +284,22 @@ func (c *Coordinator) RunWithGraph(ctx context.Context, product, platform, targe
 	wfCtx.Confirmed = true
 
 	// ========== Step 2: Agent-B 执行 ==========
-	fmt.Println("\n📢 [Graph] Step 2: Agent-B 投放执行")
-	fmt.Println(sep2)
+	fmt.Println("----------------------------------------")
+	fmt.Println(renderer.Theme.HeadingStyle("  [Step 2] Agent-B: 投放执行"))
+	fmt.Println("----------------------------------------")
 	c.state.CurrentStep = 2
 
 	execution := c.agentB.SimulateExecution(plan)
 	c.state.Execution = execution
 	wfCtx.Execute = execution
-	fmt.Printf("✅ 执行完成: %s\n", execution.Status)
-	fmt.Printf("   创建计划: %v\n", execution.CampaignIDs)
+	fmt.Printf("  %s 执行完成: %s\n", renderer.Theme.SuccessStyle("✔"), execution.Status)
+	fmt.Printf("  创建计划: %v\n", execution.CampaignIDs)
+	fmt.Println()
 
 	// ========== Step 3: Agent-C 执行 ==========
-	fmt.Println("\n📈 [Graph] Step 3: Agent-C 效果评估与经验沉淀")
-	fmt.Println(sep2)
+	fmt.Println("----------------------------------------")
+	fmt.Println(renderer.Theme.HeadingStyle("  [Step 3] Agent-C: 效果评估"))
+	fmt.Println("----------------------------------------")
 	c.state.CurrentStep = 3
 
 	perfData := c.agentC.GetPerformanceData(execution.CampaignIDs)
@@ -308,20 +312,23 @@ func (c *Coordinator) RunWithGraph(ctx context.Context, product, platform, targe
 	c.state.OverallStatus = "completed"
 	c.state.UpdatedAt = time.Now()
 
-	fmt.Printf("✅ 评估完成: %s\n", evaluation.Status)
-	fmt.Printf("   实际ROI: %.2f (预期: %.2f)\n", evaluation.ROIAchieved, evaluation.ROIExpected)
-	fmt.Printf("   达成率: %.1f%%\n", evaluation.AchievementRate)
+	fmt.Printf("  %s 评估完成: %s\n", renderer.Theme.SuccessStyle("✔"), evaluation.Status)
+	fmt.Printf("  实际ROI: %.2f (预期: %.2f) | 达成率: %.1f%%\n",
+		evaluation.ROIAchieved, evaluation.ROIExpected, evaluation.AchievementRate)
 
 	if len(evaluation.LessonsLearned) > 0 {
-		fmt.Println("\n📝 经验教训:")
+		fmt.Println()
+		fmt.Println(renderer.Theme.EmphasisStyle("  📝 经验教训:"))
 		for i, lesson := range evaluation.LessonsLearned {
-			fmt.Printf("   %d. %s\n", i+1, lesson)
+			fmt.Printf("    %d. %s\n", i+1, lesson)
 		}
 	}
 
-	fmt.Println("\n" + sep)
-	fmt.Println("✅ 工作流执行完成!")
-	fmt.Println(sep + "\n")
+	fmt.Println()
+	fmt.Println("========================================")
+	fmt.Println(renderer.Theme.SuccessStyle("  ✔ 工作流执行完成!"))
+	fmt.Println("========================================")
+	fmt.Println()
 
 	return c.state, nil
 }
