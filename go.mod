@@ -12,6 +12,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/mark3labs/mcp-go v0.20.0
 	github.com/mattn/go-sqlite3 v1.14.37
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -57,5 +58,4 @@ require (
 	golang.org/x/text v0.30.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

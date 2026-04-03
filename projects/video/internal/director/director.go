@@ -28,10 +28,10 @@ const (
 
 // Director 导演智能体
 type Director struct {
-	mgr         *manager.Manager
-	researcher  *researcher.Researcher
+	mgr          *manager.Manager
+	researcher   *researcher.Researcher
 	scriptwriter *scriptwriter.Scriptwriter
-	critic      *critic.Critic
+	critic       *critic.Critic
 }
 
 // GenerationTask 生成任务
@@ -48,10 +48,10 @@ type GenerationTask struct {
 // NewDirector 创建导演智能体
 func NewDirector(mgr *manager.Manager) *Director {
 	return &Director{
-		mgr:         mgr,
-		researcher:  researcher.NewResearcher(mgr),
+		mgr:          mgr,
+		researcher:   researcher.NewResearcher(mgr),
 		scriptwriter: scriptwriter.NewScriptwriter(mgr),
-		critic:      critic.NewCritic(mgr),
+		critic:       critic.NewCritic(mgr),
 	}
 }
 
@@ -99,8 +99,9 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 		iteration++
 
 		criticInput := &schema.CriticInput{
-			Script: d.formatScriptForReview(currentScript),
-			Theme:  req.Theme,
+			Script:   d.formatScriptForReview(currentScript),
+			Theme:    req.Theme,
+			Duration: req.Duration,
 		}
 
 		criticResult, err := d.critic.Review(ctx, criticInput)
@@ -233,6 +234,7 @@ func (d *Director) formatScriptForReview(s *schema.VideoScript) string {
 		return ""
 	}
 
+	fmt.Printf("formatScriptForReview: %#v\n", s.Scenes)
 	var buf string
 
 	if s.Title != "" {

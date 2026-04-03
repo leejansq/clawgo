@@ -55,33 +55,20 @@ func (s *Scriptwriter) WriteScript(ctx context.Context, input *schema.Scriptwrit
 
 // parseVideoScript 解析视频脚本 JSON
 func parseVideoScript(output string) (*schema.VideoScript, error) {
+	// 移除 <think>...</think> 标签（Claude 等模型的思考过程）
+	cleaned := removeThinkTags(output)
+
 	// 尝试直接解析
 	var script schema.VideoScript
-	if err := json.Unmarshal([]byte(output), &script); err == nil {
+	if err := json.Unmarshal([]byte(cleaned), &script); err == nil && len(script.Scenes) > 0 {
 		return &script, nil
 	}
 
-	// 尝试提取 ```json 代码块
-	if idx := indexOf(output, "```json"); idx >= 0 {
-		start := idx + 7
-		end := indexOf(output[start:], "```")
-		if end >= 0 {
-			jsonStr := output[start : start+end]
-			if err := json.Unmarshal([]byte(jsonStr), &script); err == nil {
-				return &script, nil
-			}
-		}
-	}
-
-	// 尝试提取 ``` 代码块
-	if idx := indexOf(output, "```"); idx >= 0 {
-		start := idx + 3
-		end := indexOf(output[start:], "```")
-		if end >= 0 {
-			jsonStr := output[start : start+end]
-			if err := json.Unmarshal([]byte(jsonStr), &script); err == nil {
-				return &script, nil
-			}
+	// 尝试提取 ```json 代码块（取最后一个，因为 LLM 经常先生成一个草稿再生成最终版本）
+	jsonBlocks := extractAllJsonBlocks(cleaned)
+	for i := len(jsonBlocks) - 1; i >= 0; i-- {
+		if err := json.Unmarshal([]byte(jsonBlocks[i]), &script); err == nil && len(script.Scenes) > 0 {
+			return &script, nil
 		}
 	}
 
@@ -91,9 +78,52 @@ func parseVideoScript(output string) (*schema.VideoScript, error) {
 	}
 
 	// 尝试从纯文本中解析分镜头
-	script.Scenes = parseScenesFromText(output)
+	script.Scenes = parseScenesFromText(cleaned)
 
 	return &script, nil
+}
+
+// removeThinkTags 移除 <think>...</think> 标签
+func removeThinkTags(s string) string {
+	result := ""
+	for {
+		start := indexOf(s, "<think>")
+		if start < 0 {
+			result += s
+			break
+		}
+		result += s[:start]
+		end := indexOf(s, "</think>")
+		if end < 0 {
+			break
+		}
+		s = s[end+8:]
+	}
+	return result
+}
+
+// extractAllJsonBlocks 提取所有 ```json 代码块内容
+func extractAllJsonBlocks(s string) []string {
+	var blocks []string
+	for {
+		idx := indexOf(s, "```json")
+		if idx < 0 {
+			break
+		}
+		start := idx + 7
+		// 跳过可能的换行
+		for start < len(s) && (s[start] == '\n' || s[start] == '\r') {
+			start++
+		}
+		end := indexOf(s[start:], "```")
+		if end < 0 {
+			break
+		}
+		blocks = append(blocks, s[start:start+end])
+		// 继续查找下一个
+		s = s[start+end+3:]
+	}
+	return blocks
 }
 
 // parseScenesFromText 从纯文本中解析分镜头

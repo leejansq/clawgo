@@ -124,8 +124,9 @@ type Case struct {
 
 // CriticInput 评论家智能体输入
 type CriticInput struct {
-	Script string `json:"script"`
-	Theme  string `json:"theme"`
+	Script   string `json:"script"`
+	Theme    string `json:"theme"`
+	Duration int    `json:"duration"` // 目标视频时长（秒）
 }
 
 // CriticOutput 评论家输出

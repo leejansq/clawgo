@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 	"github.com/leejansq/clawgo/projects/video/pkg/prompt"
@@ -29,6 +32,56 @@ import (
 type ToolProvider interface {
 	GetTools() []*schema.ToolInfo
 	CallTool(ctx context.Context, name string, args map[string]any) (string, error)
+}
+
+// ============================================================================
+// Tool 适配器
+// ============================================================================
+
+// ToolProviderAdapter 适配 ToolProvider 到 eino tool.BaseTool
+type ToolProviderAdapter struct {
+	name     string
+	provider ToolProvider
+}
+
+func (t *ToolProviderAdapter) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	tools := t.provider.GetTools()
+	for _, ti := range tools {
+		if ti.Name == t.name {
+			return ti, nil
+		}
+	}
+	return nil, fmt.Errorf("tool %s not found", t.name)
+}
+
+func (t *ToolProviderAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	var args map[string]any
+	if argumentsInJSON != "" {
+		if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
+			return "", fmt.Errorf("failed to unmarshal arguments: %w", err)
+		}
+	}
+	return t.provider.CallTool(ctx, t.name, args)
+}
+
+// EinoToolAdapter 适配自定义工具到 eino tool.BaseTool
+type EinoToolAdapter struct {
+	info    *schema.ToolInfo
+	handler func(ctx context.Context, args map[string]any) (string, error)
+}
+
+func (t *EinoToolAdapter) Info(ctx context.Context) (*schema.ToolInfo, error) {
+	return t.info, nil
+}
+
+func (t *EinoToolAdapter) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+	var args map[string]any
+	if argumentsInJSON != "" {
+		if err := json.Unmarshal([]byte(argumentsInJSON), &args); err != nil {
+			return "", fmt.Errorf("failed to unmarshal arguments: %w", err)
+		}
+	}
+	return t.handler(ctx, args)
 }
 
 // ============================================================================
@@ -62,6 +115,8 @@ type Manager struct {
 	mu            sync.RWMutex
 	sessions      map[string]*Session
 	cm            model.ToolCallingChatModel
+	cmWithTools   model.ToolCallingChatModel // 缓存绑定工具后的模型
+	reactAgent    *react.Agent               // 缓存的 React agent
 	toolProviders []ToolProvider
 }
 
@@ -79,18 +134,112 @@ func (m *Manager) RegisterToolProvider(provider ToolProvider) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.toolProviders = append(m.toolProviders, provider)
+	// 工具变更时清除缓存，下次会重新构建
+	m.cmWithTools = nil
+	m.reactAgent = nil
 }
 
 // GetAllTools 获取所有工具
 func (m *Manager) GetAllTools() []*schema.ToolInfo {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	// m.mu.RLock()
+	// defer m.mu.RUnlock()
 
 	allTools := make([]*schema.ToolInfo, 0)
 	for _, p := range m.toolProviders {
 		allTools = append(allTools, p.GetTools()...)
 	}
 	return allTools
+}
+
+// getCmWithTools 获取绑定工具后的模型（带缓存）
+func (m *Manager) getCmWithTools() (model.ToolCallingChatModel, error) {
+
+	if m.cmWithTools != nil {
+		return m.cmWithTools, nil
+	}
+
+	// 再次检查（可能有并发）
+	if m.cmWithTools != nil {
+		return m.cmWithTools, nil
+	}
+
+	allTools := m.GetAllTools()
+	if len(allTools) == 0 {
+		return m.cm, nil
+	}
+
+	cmWithTools, err := m.cm.WithTools(allTools)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind tools: %w", err)
+	}
+	m.cmWithTools = cmWithTools
+	return m.cmWithTools, nil
+}
+
+// buildToolsNodeConfig 从 toolProviders 构建 compose.ToolsNodeConfig
+func (m *Manager) buildToolsNodeConfig() (*compose.ToolsNodeConfig, error) {
+	var tools []tool.BaseTool
+
+	for _, p := range m.toolProviders {
+		for _, ti := range p.GetTools() {
+			tools = append(tools, &ToolProviderAdapter{
+				name:     ti.Name,
+				provider: p,
+			})
+		}
+	}
+
+	if len(tools) == 0 {
+		return nil, fmt.Errorf("no tools available")
+	}
+
+	return &compose.ToolsNodeConfig{
+		Tools: tools,
+	}, nil
+}
+
+// getReactAgent 获取 React Agent（带缓存）
+func (m *Manager) getReactAgent(ctx context.Context) (*react.Agent, error) {
+	m.mu.RLock()
+	if m.reactAgent != nil {
+		m.mu.RUnlock()
+		return m.reactAgent, nil
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 再次检查（可能有并发）
+	if m.reactAgent != nil {
+		return m.reactAgent, nil
+	}
+
+	// 获取绑定工具的模型
+	cmWithTools, err := m.getCmWithTools()
+	if err != nil {
+		return nil, err
+	}
+
+	// 构建 tools config
+	toolsConfig, err := m.buildToolsNodeConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// 创建 React agent
+	config := &react.AgentConfig{
+		ToolCallingModel: cmWithTools,
+		ToolsConfig:      *toolsConfig,
+		MaxStep:          10,
+	}
+	agent, err := react.NewAgent(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create React agent: %w", err)
+	}
+
+	m.reactAgent = agent
+	return m.reactAgent, nil
 }
 
 // CallTool 调用工具
@@ -181,23 +330,8 @@ func (m *Manager) ListSessions() []*Session {
 	return sessions
 }
 
-// GenerateWithTools 调用 LLM 生成（支持工具调用循环）
+// GenerateWithTools 调用 LLM 生成（使用 React Agent 处理工具调用循环）
 func (m *Manager) GenerateWithTools(ctx context.Context, systemPrompt, userInput string) (string, error) {
-	m.mu.RLock()
-	cm := m.cm
-	m.mu.RUnlock()
-
-	if cm == nil {
-		return "", fmt.Errorf("chat model not set")
-	}
-
-	// 获取所有工具并绑定到模型
-	allTools := m.GetAllTools()
-	cmWithTools, err := cm.WithTools(allTools)
-	if err != nil {
-		return "", fmt.Errorf("failed to bind tools: %w", err)
-	}
-
 	// 构建消息
 	input := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
@@ -208,127 +342,59 @@ func (m *Manager) GenerateWithTools(ctx context.Context, systemPrompt, userInput
 	log.Printf("=== LLM INPUT ===")
 	log.Printf("System: %s", systemPrompt)
 	log.Printf("User: %s", userInput)
-	// log.Printf("Tools available: %d", len(allTools))
-	// for _, t := range allTools {
-	// 	log.Printf("  - %s: %s", t.Name, t.Desc)
-	// }
 	log.Printf("=================")
 
-	// 调用 LLM（带重试）
-	result, err := m.callLLMWithRetry(ctx, cmWithTools, input)
+	// 调用 React Agent（带 ARK bug 重试）
+	result, err := m.callReactAgentWithRetry(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("LLM generation failed: %w", err)
 	}
+
 	log.Printf("=== LLM OUTPUT ===")
 	log.Printf("Content: %s", result.Content)
-	log.Printf("ToolCalls: %d", len(result.ToolCalls))
-	for _, tc := range result.ToolCalls {
-		log.Printf("  - %s(%s)", tc.Function.Name, tc.Function.Arguments)
-	}
 	log.Printf("==================")
-
-	// 处理工具调用循环 (最多 10 次迭代)
-	maxIterations := 10
-	for len(result.ToolCalls) > 0 && maxIterations > 0 {
-		maxIterations--
-
-		// 执行每个工具调用
-		for _, tc := range result.ToolCalls {
-			// 解析参数
-			args := make(map[string]any)
-			if tc.Function.Arguments != "" {
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					log.Printf("Failed to parse tool arguments: %v", err)
-					continue
-				}
-			}
-
-			log.Printf(">>> ToolCall ID: %s, Name: %s", tc.ID, tc.Function.Name)
-			log.Printf(">>> ToolCall Arguments: %s", tc.Function.Arguments)
-
-			// 调用工具
-			toolResult, err := m.CallTool(ctx, tc.Function.Name, args)
-			if err != nil {
-				toolResult = fmt.Sprintf("Error: %v", err)
-			}
-
-			log.Printf("Tool call: name=%s, args=%v, result=%s", tc.Function.Name, args, toolResult)
-
-			// 构造 tool result 消息
-			toolResultMsg := &schema.Message{
-				Role:       schema.RoleType("tool"),
-				ToolCallID: tc.ID,
-				ToolName:   tc.Function.Name,
-				Content:    toolResult,
-			}
-			log.Printf(">>> Sending tool result: Role=%s, ToolCallID=%s, ToolName=%s",
-				toolResultMsg.Role, toolResultMsg.ToolCallID, toolResultMsg.ToolName)
-			input = append(input, toolResultMsg)
-		}
-
-		// 继续 LLM 调用（带重试）
-		log.Printf("=== LLM CALL (after %d tool results) ===", len(result.ToolCalls))
-		// 打印输入消息中的最后几条（tool results）
-		for i := len(input) - len(result.ToolCalls)*2 - 3; i < len(input); i++ {
-			if i >= 0 {
-				msg := input[i]
-				log.Printf("  input[%d]: role=%s, toolCallID=%s, content_len=%d", i, msg.Role, msg.ToolCallID, len(msg.Content))
-			}
-		}
-		result, err = m.callLLMWithRetry(ctx, cmWithTools, input)
-		if err != nil {
-			return "", fmt.Errorf("LLM generate error in tool loop: %w", err)
-		}
-		log.Printf("=== LLM OUTPUT (after tools) ===")
-		log.Printf("Content: %s", result.Content)
-		log.Printf("ToolCalls: %d", len(result.ToolCalls))
-		for _, tc := range result.ToolCalls {
-			log.Printf("  - %s(%s)", tc.Function.Name, tc.Function.Arguments)
-		}
-		log.Printf("===============================")
-	}
 
 	return result.Content, nil
 }
 
-// callLLMWithRetry 调用 LLM（带重试）
-func (m *Manager) callLLMWithRetry(ctx context.Context, cm model.ToolCallingChatModel, input []*schema.Message) (*schema.Message, error) {
-
-	maxRetries := 3
-	baseDelay := 2 * time.Second
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		result, err := cm.Generate(ctx, input)
-		if err == nil {
-			return result, nil
-		}
-
-		// 检查是否是 529 错误（服务负载高）
-		errMsg := err.Error()
-		isRetryable := false
-		if strings.Contains(errMsg, "529") || strings.Contains(errMsg, "status code: 529") {
-			isRetryable = true
-			log.Printf("LLM service overloaded (529), retrying in %v... (attempt %d/%d)", baseDelay*time.Duration(1<<attempt), attempt+1, maxRetries)
-		} else if strings.Contains(errMsg, "status code: 429") || strings.Contains(errMsg, "rate limit") {
-			isRetryable = true
-			log.Printf("LLM rate limited, retrying in %v... (attempt %d/%d)", baseDelay*time.Duration(1<<attempt), attempt+1, maxRetries)
-		}
-
-		if !isRetryable || attempt == maxRetries-1 {
-			return nil, err
-		}
-
-		// 指数退避
-		delay := baseDelay * time.Duration(1<<attempt)
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(delay):
-			// 继续重试
-		}
+// callReactAgentWithRetry 调用 React Agent（带 ARK bug 重试）
+func (m *Manager) callReactAgentWithRetry(ctx context.Context, input []*schema.Message) (*schema.Message, error) {
+	// 获取 React Agent
+	agent, err := m.getReactAgent(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, fmt.Errorf("max retries exceeded")
+	// 调用 agent.Generate（它内部处理工具调用循环）
+	result, err := agent.Generate(ctx, input)
+	if err != nil {
+		// 检查是否是 ARK 模型工具调用 ID 问题
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "tool id") && strings.Contains(errMsg, "not found") {
+			// ARK 模型多轮工具调用 bug：清除缓存的 agent 并重试
+			log.Printf("ARK model tool ID bug detected, clearing agent cache and retrying...")
+			m.mu.Lock()
+			m.reactAgent = nil
+			m.mu.Unlock()
+
+			// 重新获取 agent
+			agent, err = m.getReactAgent(ctx)
+			if err != nil {
+				return nil, err
+			}
+
+			// 重试（只重试一次）
+			result, err = agent.Generate(ctx, input)
+			if err != nil {
+				return nil, fmt.Errorf("ARK bug retry failed: %w", err)
+			}
+			log.Printf("ARK bug retry succeeded")
+			return result, nil
+		}
+		return nil, err
+	}
+
+	return result, nil
 }
 
 // ============================================================================
