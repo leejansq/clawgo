@@ -18,6 +18,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 )
 
 // MemoryStore is the core interface for memory management
@@ -48,6 +49,14 @@ type MemoryStore interface {
 func New(ctx context.Context, cfg *Config) (MemoryStore, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
+	}
+	if cfg.Embedder == nil {
+		fmt.Println("xxxxxx------")
+		embedder, err := DefaultZhipuEmbedder(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ZhipuEmbedder: %w", err)
+		}
+		cfg.Embedder = embedder
 	}
 
 	return newMemoryStore(ctx, cfg)

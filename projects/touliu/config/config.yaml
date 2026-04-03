@@ -1,0 +1,39 @@
+# 电商投流多 Agent 系统配置
+
+# LLM 模型配置
+model:
+  type: "openai"  # openai 或 ark
+  name: "gpt-4o"
+  api_key: "${OPENAI_API_KEY}"
+  base_url: "https://api.openai.com/v1"
+
+# Agent 超时配置 (秒)
+agent:
+  timeout: 300
+  max_depth: 3
+
+# 知识库配置
+knowledge:
+  base_path: "./knowledge"
+
+# 工作空间配置
+workspace:
+  root: "./workspace"
+
+# 平台配置
+platforms:
+  - name: "douyin"
+    display_name: "抖音"
+  - name: "weibo"
+    display_name: "微博"
+  - name: "toutiao"
+    display_name: "头条"
+
+# 默认投放参数
+defaults:
+  product: "示例产品"
+  platform: "douyin"
+  target_market: "一线城市"
+  daily_budget: 1000.0
+  bid_type: "CPC"
+  bid_amount: 1.5

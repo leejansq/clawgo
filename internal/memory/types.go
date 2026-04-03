@@ -33,39 +33,39 @@ const (
 
 // MemoryMeta contains metadata for a memory entry
 type MemoryMeta struct {
-	Type       MemoryType  // long_term / short_term
-	Date       string      // YYYY-MM-DD (for short-term memory)
-	Source     string      // Source identifier
-	Importance int         // Importance score (0-10)
-	Tags       []string    // Tags for categorization
-	CreatedAt  time.Time   // Creation timestamp
+	Type       MemoryType // long_term / short_term
+	Date       string     // YYYY-MM-DD (for short-term memory)
+	Source     string     // Source identifier
+	Importance int        // Importance score (0-10)
+	Tags       []string   // Tags for categorization
+	CreatedAt  time.Time  // Creation timestamp
 }
 
 // SearchResult represents a search result from memory (OpenClaw pattern: path + lines, content read from file)
 type SearchResult struct {
-	Path       string      // File path (e.g., "MEMORY.md" or "memory/2026-03-30.md")
-	StartLine  int         // Start line number (1-indexed)
-	EndLine    int         // End line number (1-indexed)
-	Snippet    string      // Content snippet (read from file by memory_get)
-	Score      float64     // Relevance score
-	MemoryMeta            // Embedded metadata
-	ChunkID   string       // Chunk identifier
+	Path       string  // File path (e.g., "MEMORY.md" or "memory/2026-03-30.md")
+	StartLine  int     // Start line number (1-indexed)
+	EndLine    int     // End line number (1-indexed)
+	Snippet    string  // Content snippet (read from file by memory_get)
+	Score      float64 // Relevance score
+	MemoryMeta         // Embedded metadata
+	ChunkID    string  // Chunk identifier
 }
 
 // SearchOptions contains options for memory search
 type SearchOptions struct {
-	Limit              int       // Maximum number of results
-	MinScore           float64   // Minimum relevance score
-	MemoryTypes        []MemoryType // Filter by memory types
-	Dates              []string  // Filter by dates (for short-term)
-	Tags               []string  // Filter by tags
-	UseHybrid          bool      // Use hybrid search (vector + BM25)
-	VectorWeight       float64   // Weight for vector search (0-1)
-	UseMMR             bool       // Use MMR re-ranking
-	MMRLambda          float64   // MMR lambda parameter (0-1)
-	UseTimeDecay       bool       // Apply time decay
-	TimeDecayFactor    float64   // Time decay factor per day
-	TimeDecayHalfLifeDays float64 // Half-life for time decay in days (for display)
+	Limit                 int          // Maximum number of results
+	MinScore              float64      // Minimum relevance score
+	MemoryTypes           []MemoryType // Filter by memory types
+	Dates                 []string     // Filter by dates (for short-term)
+	Tags                  []string     // Filter by tags
+	UseHybrid             bool         // Use hybrid search (vector + BM25)
+	VectorWeight          float64      // Weight for vector search (0-1)
+	UseMMR                bool         // Use MMR re-ranking
+	MMRLambda             float64      // MMR lambda parameter (0-1)
+	UseTimeDecay          bool         // Apply time decay
+	TimeDecayFactor       float64      // Time decay factor per day
+	TimeDecayHalfLifeDays float64      // Half-life for time decay in days (for display)
 }
 
 // SearchOption is a functional option for SearchOptions
@@ -165,9 +165,9 @@ func WithSearchTimeDecayFactor(factor float64) SearchOption {
 
 // Chunk represents a memory chunk stored in the vector database
 type Chunk struct {
-	ID         string
-	Content    string
-	Vector     []float64
+	ID      string
+	Content string
+	Vector  []float64
 	MemoryMeta
 }
 
@@ -193,10 +193,10 @@ type Config struct {
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		BaseDir:       "/tmp/eino/memory",
-		VectorDBPath:  "/tmp/eino/memory/vector.db",
-		ChunkSize:     512,
-		ChunkOverlap:  50,
+		BaseDir:      "/tmp/eino/memory",
+		VectorDBPath: "/tmp/eino/memory/vector.db",
+		ChunkSize:    512,
+		ChunkOverlap: 50,
 	}
 }
 
