@@ -168,12 +168,16 @@ func parseScenesFromText(text string) []schema.Scene {
 	// 如果没有解析到镜头，创建单个镜头
 	if len(scenes) == 0 {
 		scenes = append(scenes, schema.Scene{
-			Index:       1,
-			Duration:    15,
-			Description: "中景",
-			Script:      text,
-			Visual:      "待补充画面描述",
-			CameraMove:  "固定",
+			Index:          1,
+			Duration:       15,
+			Description:    "中景",
+			Script:         text,
+			Visual:         "待补充画面描述",
+			CameraMove:     "固定",
+			Style:          "自然",
+			TextEffect:     "无",
+			LightEffect:    "自然光",
+			NegativePrompt: "模糊、低质量、变形",
 		})
 	}
 
@@ -188,12 +192,16 @@ func parseScenesFromText(text string) []schema.Scene {
 // parseSceneLines 解析单镜头的多行文本
 func parseSceneLines(index int, lines []string) schema.Scene {
 	scene := schema.Scene{
-		Index:       index,
-		Duration:    10,
-		Description: "中景",
-		Script:      strings.Join(lines, "\n"),
-		Visual:      "待补充画面描述",
-		CameraMove:  "固定",
+		Index:          index,
+		Duration:       10,
+		Description:    "中景",
+		Script:         strings.Join(lines, "\n"),
+		Visual:         "待补充画面描述",
+		CameraMove:     "固定",
+		Style:          "自然",
+		TextEffect:     "无",
+		LightEffect:    "自然光",
+		NegativePrompt: "模糊、低质量、变形",
 	}
 
 	// 尝试提取时长

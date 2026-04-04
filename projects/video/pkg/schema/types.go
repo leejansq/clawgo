@@ -17,6 +17,7 @@ type VideoScriptRequest struct {
 	TargetAudience string `json:"audience"`        // 目标受众
 	Duration       int    `json:"duration"`        // 总时长（秒）
 	Language       string `json:"language"`       // 语言，默认中文
+	StrictDuration bool   `json:"strict_duration"` // 是否严格遵守时长要求（true: 必须严格匹配，false: 参考，可浮动）
 }
 
 // GenerateResponse 生成响应
@@ -48,13 +49,17 @@ type VideoScript struct {
 
 // Scene 分镜头（用于即梦生成，每镜最长15秒）
 type Scene struct {
-	Index       int    `json:"index"`        // 镜头序号（从1开始）
-	Duration    int    `json:"duration"`     // 时长（秒），最大15
-	Description string `json:"description"` // 镜头描述（远景/中景/近景等）
-	Script      string `json:"script"`       // 台词/旁白
-	Visual      string `json:"visual"`       // 画面描述（运镜、专业术语）
-	Audio       string `json:"audio"`        // 音效/音乐建议
-	CameraMove  string `json:"camera_move"`  // 运镜方式（推/拉/摇/移/跟/升降等）
+	Index          int    `json:"index"`          // 镜头序号（从1开始）
+	Duration       int    `json:"duration"`       // 时长（秒），最大15
+	Description    string `json:"description"`    // 镜头描述（远景/中景/近景等）
+	Script         string `json:"script"`          // 台词/旁白
+	Visual         string `json:"visual"`          // 画面描述（运镜、专业术语）
+	Audio          string `json:"audio"`           // 音效/音乐建议
+	CameraMove     string `json:"camera_move"`     // 运镜方式（推/拉/摇/移/跟/升降等）
+	Style          string `json:"style"`           // 风格/质感（如：写实、赛博朋克、水墨、像素风等）
+	TextEffect     string `json:"text_effect"`     // 文字动画效果（如：淡入淡出、打字机、闪烁等）
+	LightEffect    string `json:"light_effect"`    // 光效（如：柔光、逆光、光斑、光剑等）
+	NegativePrompt string `json:"negative_prompt"` // 负面描述（防崩神器，如：模糊、变形、低质量等）
 }
 
 // ScriptMeta 脚本元数据
@@ -106,13 +111,14 @@ type ResearcherInput struct {
 
 // ResearcherOutput 研究员智能体输出
 type ResearcherOutput struct {
-	Overview    string   `json:"overview"`     // 主题概述
-	KeyData     []string `json:"key_data"`     // 关键数据点
-	CaseStudies []Case   `json:"case_studies"` // 有说服力的案例
-	Trends      []string `json:"trends"`       // 最新动态/趋势
-	FunFacts    []string `json:"fun_facts"`   // 有趣的事实
-	Sources     []string `json:"sources"`      // 来源URL
-	Error       string   `json:"error,omitempty"`
+	Overview        string   `json:"overview"`          // 主题概述和目标人群画像
+	AudienceInsights []string `json:"audience_insights"` // 目标人群的喜好和痛点
+	KeyData         []string `json:"key_data"`          // 关键数据点
+	CaseStudies     []Case   `json:"case_studies"`     // 有说服力的案例
+	Trends          []string `json:"trends"`            // 最新动态/趋势
+	FunFacts        []string `json:"fun_facts"`        // 有趣的事实
+	Sources         []string `json:"sources"`          // 来源URL
+	Error           string   `json:"error,omitempty"`
 }
 
 // Case 案例
@@ -124,9 +130,10 @@ type Case struct {
 
 // CriticInput 评论家智能体输入
 type CriticInput struct {
-	Script   string `json:"script"`
-	Theme    string `json:"theme"`
-	Duration int    `json:"duration"` // 目标视频时长（秒）
+	Script         string `json:"script"`
+	Theme          string `json:"theme"`
+	Duration       int    `json:"duration"`        // 目标视频时长（秒）
+	StrictDuration bool   `json:"strict_duration"` // 是否严格遵守时长
 }
 
 // CriticOutput 评论家输出
@@ -145,6 +152,7 @@ type CriticScores struct {
 	Visual    int `json:"visual"`    // 画面 1-10
 	Camera    int `json:"camera"`    // 运镜 1-10
 	Pacing    int `json:"pacing"`     // 节奏 1-10
+	Effects   int `json:"effects"`    // 效果（风格/光效/文字特效）1-10
 }
 
 // ============================================================================

@@ -99,9 +99,10 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 		iteration++
 
 		criticInput := &schema.CriticInput{
-			Script:   d.formatScriptForReview(currentScript),
-			Theme:    req.Theme,
-			Duration: req.Duration,
+			Script:         d.formatScriptForReview(currentScript),
+			Theme:          req.Theme,
+			Duration:       req.Duration,
+			StrictDuration: req.StrictDuration,
 		}
 
 		criticResult, err := d.critic.Review(ctx, criticInput)
@@ -193,6 +194,14 @@ func (d *Director) formatResearchData(r *schema.ResearcherOutput) string {
 		buf += fmt.Sprintf("【主题概述】\n%s\n\n", r.Overview)
 	}
 
+	if len(r.AudienceInsights) > 0 {
+		buf += "【目标人群洞察】\n"
+		for _, insight := range r.AudienceInsights {
+			buf += fmt.Sprintf("- %s\n", insight)
+		}
+		buf += "\n"
+	}
+
 	if len(r.KeyData) > 0 {
 		buf += "【关键数据】\n"
 		for _, d := range r.KeyData {
@@ -254,6 +263,18 @@ func (d *Director) formatScriptForReview(s *schema.VideoScript) string {
 			buf += fmt.Sprintf("台词: %s\n", scene.Script)
 			if scene.Audio != "" {
 				buf += fmt.Sprintf("音效: %s\n", scene.Audio)
+			}
+			if scene.Style != "" {
+				buf += fmt.Sprintf("风格: %s\n", scene.Style)
+			}
+			if scene.TextEffect != "" {
+				buf += fmt.Sprintf("文字特效: %s\n", scene.TextEffect)
+			}
+			if scene.LightEffect != "" {
+				buf += fmt.Sprintf("光效: %s\n", scene.LightEffect)
+			}
+			if scene.NegativePrompt != "" {
+				buf += fmt.Sprintf("负面描述: %s\n", scene.NegativePrompt)
 			}
 		}
 	}

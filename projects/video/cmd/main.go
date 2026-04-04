@@ -153,6 +153,14 @@ func generateScript(dir *director.Director, theme string, reader *bufio.Reader) 
 		fmt.Sscanf(durationStr, "%d", &duration)
 	}
 
+	fmt.Print("  严格时长(true/false，默认false，直接回车使用默认值): ")
+	strictStr, _ := reader.ReadString('\n')
+	strictStr = strings.TrimSpace(strings.ToLower(strictStr))
+	strictDuration := false
+	if strictStr == "true" || strictStr == "是" {
+		strictDuration = true
+	}
+
 	fmt.Println()
 	fmt.Println("--- 开始生成视频脚本 ---")
 	fmt.Println("  (LLM会根据需要自动调用web_search工具搜集资料)")
@@ -163,6 +171,7 @@ func generateScript(dir *director.Director, theme string, reader *bufio.Reader) 
 		Theme:          theme,
 		TargetAudience: audience,
 		Duration:       duration,
+		StrictDuration: strictDuration,
 	}
 
 	// 生成
