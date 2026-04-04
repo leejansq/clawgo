@@ -112,12 +112,13 @@ type Session struct {
 
 // Manager 子智能体管理器
 type Manager struct {
-	mu            sync.RWMutex
-	sessions      map[string]*Session
-	cm            model.ToolCallingChatModel
-	cmWithTools   model.ToolCallingChatModel // 缓存绑定工具后的模型
-	reactAgent    *react.Agent               // 缓存的 React agent
-	toolProviders []ToolProvider
+	mu             sync.RWMutex
+	sessions       map[string]*Session
+	cm             model.ToolCallingChatModel
+	cmWithTools    model.ToolCallingChatModel // 缓存绑定工具后的模型
+	reactAgent     *react.Agent               // 缓存的 React agent
+	toolProviders  []ToolProvider
+	conversationHistory []*schema.Message      // 多轮对话历史（按时间顺序存储）
 }
 
 // NewManager 创建管理器（使用 ToolCallingChatModel）
@@ -137,6 +138,30 @@ func (m *Manager) RegisterToolProvider(provider ToolProvider) {
 	// 工具变更时清除缓存，下次会重新构建
 	m.cmWithTools = nil
 	m.reactAgent = nil
+}
+
+// ClearConversationHistory 清除对话历史（用于开始新的生成任务）
+func (m *Manager) ClearConversationHistory() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.conversationHistory = nil
+}
+
+// GetConversationHistory 获取对话历史
+func (m *Manager) GetConversationHistory() []*schema.Message {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.conversationHistory
+}
+
+// AppendToHistory 添加消息到对话历史
+func (m *Manager) AppendToHistory(role schema.RoleType, content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.conversationHistory = append(m.conversationHistory, &schema.Message{
+		Role:    role,
+		Content: content,
+	})
 }
 
 // GetAllTools 获取所有工具
@@ -332,16 +357,31 @@ func (m *Manager) ListSessions() []*Session {
 
 // GenerateWithTools 调用 LLM 生成（使用 React Agent 处理工具调用循环）
 func (m *Manager) GenerateWithTools(ctx context.Context, systemPrompt, userInput string) (string, error) {
+	return m.GenerateWithToolsAndHistory(ctx, systemPrompt, userInput, nil)
+}
+
+// GenerateWithToolsAndHistory 调用 LLM 生成（支持多轮对话记忆）
+func (m *Manager) GenerateWithToolsAndHistory(ctx context.Context, systemPrompt, userInput string, history []*schema.Message) (string, error) {
 	// 构建消息
 	input := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userInput),
 	}
+
+	// 添加历史消息
+	if history != nil {
+		input = append(input, history...)
+	}
+
+	// 添加当前用户输入
+	input = append(input, schema.UserMessage(userInput))
 
 	// 打印 LLM 输入日志
 	log.Printf("=== LLM INPUT ===")
 	log.Printf("System: %s", systemPrompt)
 	log.Printf("User: %s", userInput)
+	if history != nil {
+		log.Printf("History messages: %d", len(history))
+	}
 	log.Printf("=================")
 
 	// 调用 React Agent（带 ARK bug 重试）
@@ -444,12 +484,19 @@ func (m *Manager) ExecuteScriptwriter(ctx context.Context, input *videoschema.Sc
 	// 构建 prompt
 	userPrompt := prompt.BuildScriptwriterPrompt(input)
 
-	// 调用 LLM
-	output, err := m.GenerateWithTools(ctx, session.SystemPrompt, userPrompt)
+	// 获取对话历史（用于多轮对话记忆）
+	history := m.GetConversationHistory()
+
+	// 调用 LLM（带多轮对话历史）
+	output, err := m.GenerateWithToolsAndHistory(ctx, session.SystemPrompt, userPrompt, history)
 	if err != nil {
 		m.UpdateSessionStatus(sessionKey, "error", "", err.Error())
 		return nil, err
 	}
+
+	// 追加用户消息和助手回复到历史
+	m.AppendToHistory(schema.RoleType("user"), userPrompt)
+	m.AppendToHistory(schema.RoleType("assistant"), output)
 
 	m.UpdateSessionStatus(sessionKey, "completed", output, "")
 

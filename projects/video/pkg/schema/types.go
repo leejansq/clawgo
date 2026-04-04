@@ -18,6 +18,7 @@ type VideoScriptRequest struct {
 	Duration       int    `json:"duration"`        // 总时长（秒）
 	Language       string `json:"language"`       // 语言，默认中文
 	StrictDuration bool   `json:"strict_duration"` // 是否严格遵守时长要求（true: 必须严格匹配，false: 参考，可浮动）
+	HumanFeedback  string `json:"human_feedback"`  // 人工反馈修改意见
 }
 
 // GenerateResponse 生成响应
@@ -41,25 +42,37 @@ type GenerationResult struct {
 
 // VideoScript 视频脚本结构（分镜头格式）
 type VideoScript struct {
-	Title       string        `json:"title"`        // 视频标题
-	Introduction string        `json:"introduction"` // 开场介绍（可选）
-	Scenes      []Scene       `json:"scenes"`       // 分镜头列表
-	Metadata    ScriptMeta    `json:"metadata"`     // 元数据
+	Title       string     `json:"title"`        // 视频标题
+	Introduction string    `json:"introduction"` // 开场介绍（可选）
+	GlobalStyle string    `json:"global_style"` // 全局视觉风格（所有资产必须统一遵循）
+	Scenes      []Scene    `json:"scenes"`       // 分镜头列表
+	Assets      []Asset   `json:"assets"`       // 全局资产（人物/道具等，用于生成图片）
+	Metadata    ScriptMeta `json:"metadata"`     // 元数据
+}
+
+// Asset 资产（人物、道具等，用于生成图片）
+type Asset struct {
+	Name        string `json:"name"`        // 资产名称（如：科学家、实验室、AI机器人）
+	Type        string `json:"type"`        // 类型：character/人物, prop/道具, background/背景, other/其他
+	Description string `json:"description"` // 资产描述（用于生成图片）
+	Prompt      string `json:"prompt"`      // 文生图提示词（正面）
+	Negative    string `json:"negative"`    // 负面提示词（如：低质量、变形、水印等）
 }
 
 // Scene 分镜头（用于即梦生成，每镜最长15秒）
 type Scene struct {
-	Index          int    `json:"index"`          // 镜头序号（从1开始）
-	Duration       int    `json:"duration"`       // 时长（秒），最大15
-	Description    string `json:"description"`    // 镜头描述（远景/中景/近景等）
-	Script         string `json:"script"`          // 台词/旁白
-	Visual         string `json:"visual"`          // 画面描述（运镜、专业术语）
-	Audio          string `json:"audio"`           // 音效/音乐建议
-	CameraMove     string `json:"camera_move"`     // 运镜方式（推/拉/摇/移/跟/升降等）
-	Style          string `json:"style"`           // 风格/质感（如：写实、赛博朋克、水墨、像素风等）
-	TextEffect     string `json:"text_effect"`     // 文字动画效果（如：淡入淡出、打字机、闪烁等）
-	LightEffect    string `json:"light_effect"`    // 光效（如：柔光、逆光、光斑、光剑等）
-	NegativePrompt string `json:"negative_prompt"` // 负面描述（防崩神器，如：模糊、变形、低质量等）
+	Index          int      `json:"index"`          // 镜头序号（从1开始）
+	Duration       int      `json:"duration"`       // 时长（秒），最大15
+	Description    string   `json:"description"`     // 镜头描述（远景/中景/近景等）
+	Script         string   `json:"script"`          // 台词/旁白
+	Visual         string   `json:"visual"`          // 画面描述（运镜、专业术语）
+	Audio          string   `json:"audio"`           // 音效/音乐建议
+	CameraMove     string   `json:"camera_move"`     // 运镜方式（推/拉/摇/移/跟/升降等）
+	Style          string   `json:"style"`           // 风格/质感（如：写实、赛博朋克、水墨、像素风等）
+	TextEffect     string   `json:"text_effect"`     // 文字动画效果（如：淡入淡出、打字机、闪烁等）
+	LightEffect    string   `json:"light_effect"`    // 光效（如：柔光、逆光、光斑、光剑等）
+	NegativePrompt string   `json:"negative_prompt"` // 负面描述（防崩神器，如：模糊、变形、低质量等）
+	Assets         []string `json:"assets"`         // 引用资产名称列表（如：["科学家", "实验室"]）
 }
 
 // ScriptMeta 脚本元数据
@@ -95,6 +108,7 @@ type ScriptwriterInput struct {
 	Iteration      int    `json:"iteration"`
 	PreviousScript string `json:"previous_script,omitempty"`
 	CriticFeedback string `json:"critic_feedback,omitempty"`
+	HumanFeedback  string `json:"human_feedback,omitempty"` // 人工反馈
 }
 
 // ScriptwriterOutput 编剧智能体输出
@@ -153,6 +167,7 @@ type CriticScores struct {
 	Camera    int `json:"camera"`    // 运镜 1-10
 	Pacing    int `json:"pacing"`     // 节奏 1-10
 	Effects   int `json:"effects"`    // 效果（风格/光效/文字特效）1-10
+	Spatial   int `json:"spatial"`    // 空间结构与比例 1-10
 }
 
 // ============================================================================

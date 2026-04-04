@@ -178,6 +178,7 @@ func parseScenesFromText(text string) []schema.Scene {
 			TextEffect:     "无",
 			LightEffect:    "自然光",
 			NegativePrompt: "模糊、低质量、变形",
+			Assets:         []string{},
 		})
 	}
 
@@ -202,6 +203,7 @@ func parseSceneLines(index int, lines []string) schema.Scene {
 		TextEffect:     "无",
 		LightEffect:    "自然光",
 		NegativePrompt: "模糊、低质量、变形",
+		Assets:         []string{}, // 引用资产名称列表
 	}
 
 	// 尝试提取时长

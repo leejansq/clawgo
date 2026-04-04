@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,9 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 		req.Language = "中文"
 	}
 
+	// 清除上一次的对话历史（开始新的生成任务）
+	d.mgr.ClearConversationHistory()
+
 	// 第一步：研究员搜集资料
 	researchInput := &schema.ResearcherInput{
 		Theme:   req.Theme,
@@ -84,8 +88,9 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 		Theme:          req.Theme,
 		TargetAudience: req.TargetAudience,
 		Duration:       req.Duration,
-		ResearchData:   researchData,
+		ResearchData:    researchData,
 		Iteration:      1,
+		HumanFeedback:   req.HumanFeedback,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("script generation failed: %w", err)
@@ -126,10 +131,11 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 			Theme:          req.Theme,
 			TargetAudience: req.TargetAudience,
 			Duration:       req.Duration,
-			ResearchData:   researchData,
+			ResearchData:    researchData,
 			Iteration:      iteration + 1,
 			PreviousScript: d.formatScriptForReview(currentScript),
 			CriticFeedback: lastCriticResult.Feedback,
+			HumanFeedback:  req.HumanFeedback,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("script revision failed: %w", err)
@@ -252,6 +258,22 @@ func (d *Director) formatScriptForReview(s *schema.VideoScript) string {
 	if s.Introduction != "" {
 		buf += fmt.Sprintf("【开场介绍】%s\n", s.Introduction)
 	}
+	if s.GlobalStyle != "" {
+		buf += fmt.Sprintf("【全局视觉风格】%s\n", s.GlobalStyle)
+	}
+
+	// 显示全局资产（人物/道具等）
+	if len(s.Assets) > 0 {
+		buf += "\n【资产（文生图）】\n"
+		for _, asset := range s.Assets {
+			buf += fmt.Sprintf("[%s] %s\n", asset.Type, asset.Name)
+			buf += fmt.Sprintf("  描述: %s\n", asset.Description)
+			buf += fmt.Sprintf("  提示词: %s\n", asset.Prompt)
+			if asset.Negative != "" {
+				buf += fmt.Sprintf("  负面提示词: %s\n", asset.Negative)
+			}
+		}
+	}
 
 	if len(s.Scenes) > 0 {
 		buf += "\n【分镜头脚本】\n"
@@ -275,6 +297,10 @@ func (d *Director) formatScriptForReview(s *schema.VideoScript) string {
 			}
 			if scene.NegativePrompt != "" {
 				buf += fmt.Sprintf("负面描述: %s\n", scene.NegativePrompt)
+			}
+			// 显示引用的资产
+			if len(scene.Assets) > 0 {
+				buf += fmt.Sprintf("使用资产: %s\n", strings.Join(scene.Assets, ", "))
 			}
 		}
 	}

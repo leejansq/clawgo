@@ -191,7 +191,59 @@ func generateScript(dir *director.Director, theme string, reader *bufio.Reader) 
 	printResult(result)
 
 	fmt.Printf("\n⏱️  生成耗时: %v\n", elapsed)
-	fmt.Println()
+
+	// 人工反馈环节
+	for {
+		fmt.Println()
+		fmt.Print("是否满意当前脚本？(直接回车或输入y表示满意，输入n表示需要修改): ")
+		satisfied, _ := reader.ReadString('\n')
+		satisfied = strings.TrimSpace(strings.ToLower(satisfied))
+
+		if satisfied == "" || satisfied == "y" || satisfied == "yes" {
+			fmt.Println("\n✅ 脚本已确认，生成完成！")
+			return
+		}
+
+		if satisfied == "n" || satisfied == "no" {
+			fmt.Println("\n请输入您的修改意见（直接回车结束输入，以空行结束）:")
+			fmt.Println("--------------------------------------------------------")
+			var feedbackLines []string
+			for {
+				line, _ := reader.ReadString('\n')
+				line = strings.TrimRight(line, "\r\n")
+				if line == "" {
+					break
+				}
+				feedbackLines = append(feedbackLines, line)
+			}
+			humanFeedback := strings.Join(feedbackLines, "\n")
+			if humanFeedback == "" {
+				fmt.Println("未输入修改意见，保留当前版本。")
+				return
+			}
+
+			fmt.Println("\n收到修改意见，正在重新生成...")
+			fmt.Println("--------------------------------------------------------")
+
+			// 带反馈重新生成（创建新的context，避免超时）
+			req.HumanFeedback = humanFeedback
+			regenCtx, regenCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			startTime = time.Now()
+			result, err = dir.Generate(regenCtx, req)
+			regenCancel()
+			if err != nil {
+				fmt.Printf("\n❌ 重新生成失败: %v\n", err)
+				return
+			}
+
+			// 打印新结果
+			printResult(result)
+			fmt.Printf("\n⏱️  生成耗时: %v\n", elapsed)
+			continue
+		}
+
+		fmt.Println("无效输入，请输入 y/n 或直接回车表示满意")
+	}
 }
 
 func printResult(result *schema.GenerationResult) {
