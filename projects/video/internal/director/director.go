@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/leejansq/clawgo/internal/session"
 	"github.com/leejansq/clawgo/projects/video/internal/critic"
 	"github.com/leejansq/clawgo/projects/video/internal/manager"
 	"github.com/leejansq/clawgo/projects/video/internal/researcher"
@@ -33,6 +34,11 @@ type Director struct {
 	researcher   *researcher.Researcher
 	scriptwriter *scriptwriter.Scriptwriter
 	critic       *critic.Critic
+
+	// session stores for branch isolation
+	rootSessionStore         session.SessionStore // 根 session（图片洞察、研究资料）
+	scriptwriterSessionStore session.SessionStore // 编剧分支 session
+	criticSessionStore       session.SessionStore // 评论家分支 session（每次迭代重新创建）
 }
 
 // GenerationTask 生成任务
@@ -66,42 +72,87 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 		req.Language = "中文"
 	}
 
-	// 清除上一次的对话历史（开始新的生成任务）
-	d.mgr.ClearConversationHistory()
+	// ========== 第一阶段：创建根 session 并搜集资料 ==========
 
-	// 第一步：研究员搜集资料
-	researchInput := &schema.ResearcherInput{
-		Theme:   req.Theme,
-		Aspects: []string{"最新动态", "数据统计", "案例分析", "发展趋势"},
+	// 创建根 session
+	d.rootSessionStore = session.NewSessionStore()
+	rootSessionID, err := d.rootSessionStore.CreateSession(".")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create root session: %w", err)
+	}
+	fmt.Printf("[Director] Created root session: %s\n", rootSessionID)
+
+	// 0. 如果有图片，先解析图片获取描述
+
+	if req.Images != "" {
+		fmt.Printf("开始解析图片: %s\n", req.Images)
+		err = d.ParseImages(ctx, req.Images)
+		if err != nil {
+			fmt.Printf("Warning: failed to parse images: %v\n", err)
+		}
 	}
 
+	// 1. 研究员搜集资料
+	researchInput := &schema.ResearcherInput{
+		Theme:   req.Theme,
+		Aspects: []string{"最新AI视频动态", "主题相关话题数据统计", "主题相关视频案例分析", "视频热度"},
+	}
+
+	d.mgr.SetSessionStore(d.rootSessionStore)
 	researchResult, err := d.researcher.Research(ctx, researchInput)
 	if err != nil {
 		return nil, fmt.Errorf("research failed: %w", err)
 	}
+	fmt.Printf("-----------> %#v\n", researchResult)
+
+	// 2. 将研究资料写入根 session
+	researchData := d.formatResearchData(researchResult)
+	d.rootSessionStore.AppendMessage("system", "【研究资料】\n"+researchData)
+
+	// ========== 第二阶段：创建编剧分支（独立的 session store）==========
+
+	// 从根 session 创建编剧分支
+	d.scriptwriterSessionStore, err = d.createBranchFromRoot("scriptwriter")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create scriptwriter branch: %w", err)
+	}
+	fmt.Printf("[Director] Created scriptwriter branch\n")
 
 	// 整理研究资料
-	researchData := d.formatResearchData(researchResult)
+	researchData = d.formatResearchData(researchResult)
 
-	// 第二步：编剧生成初稿
+	// 第二步：编剧生成初稿（在编剧分支上）
+	// 设置 manager 使用编剧分支
+	d.mgr.SetSessionStore(d.scriptwriterSessionStore)
+
 	currentScript, err := d.scriptwriter.WriteScript(ctx, &schema.ScriptwriterInput{
 		Theme:          req.Theme,
 		TargetAudience: req.TargetAudience,
 		Duration:       req.Duration,
-		ResearchData:    researchData,
+		ResearchData:   researchData,
 		Iteration:      1,
-		HumanFeedback:   req.HumanFeedback,
+		HumanFeedback:  req.HumanFeedback,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("script generation failed: %w", err)
 	}
 
 	// 第三步：评论家审查（可能需要迭代）
+	d.criticSessionStore, err = d.createBranchFromRoot("critic")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create critic branch: %w", err)
+	}
+	fmt.Printf("[Director] Created critic branch\n")
 	iteration := 0
 	var lastCriticResult *schema.CriticOutput
 
 	for iteration < maxIterations {
 		iteration++
+
+		// 为评论家创建独立的 session 分支（每次迭代重新从根创建）
+
+		// 设置 manager 使用评论家分支
+		d.mgr.SetSessionStore(d.criticSessionStore)
 
 		criticInput := &schema.CriticInput{
 			Script:         d.formatScriptForReview(currentScript),
@@ -121,6 +172,9 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 			lastCriticResult = criticResult
 		}
 
+		// 恢复编剧分支（评论家分支不影响编剧分支）
+		d.mgr.SetSessionStore(d.scriptwriterSessionStore)
+
 		// 如果通过或达到最大迭代次数，退出
 		if lastCriticResult.Approved || iteration >= maxIterations {
 			break
@@ -131,7 +185,7 @@ func (d *Director) Generate(ctx context.Context, req *schema.VideoScriptRequest)
 			Theme:          req.Theme,
 			TargetAudience: req.TargetAudience,
 			Duration:       req.Duration,
-			ResearchData:    researchData,
+			ResearchData:   researchData,
 			Iteration:      iteration + 1,
 			PreviousScript: d.formatScriptForReview(currentScript),
 			CriticFeedback: lastCriticResult.Feedback,
@@ -334,6 +388,148 @@ func (d *Director) integrateScript(s *schema.VideoScript, r *schema.ResearcherOu
 	return s
 }
 
+// ParseImages 通过 reactAgent 读取并解析图片，获取图片描述
+func (d *Director) ParseImages(ctx context.Context, imagesStr string) error {
+	if imagesStr == "" {
+		return nil
+	}
+
+	paths := parseImagePaths(imagesStr)
+	fmt.Printf("解析到的图片路径: %v\n", paths)
+	if len(paths) == 0 {
+		return nil
+	}
+
+	// 构建读取图片的 prompt
+	var pathList string
+	for i, p := range paths {
+		pathList += fmt.Sprintf("图片%d路径：%s\n", i+1, p)
+	}
+	readPrompt := fmt.Sprintf(`请使用工具读取和理解以下图片，获取图片描述。
+
+图片列表：
+%s
+
+请逐个调用工具获取这些图片信息，然后在回复中以以下格式返回图片描述：
+{
+  "image_descriptions": [
+    "图片1: 描述内容",
+    "图片2: 描述内容"
+  ]
+}`, pathList)
+
+	// 调用 LLM，让 reactAgent 处理工具调用
+	descOutput, err := d.mgr.GenerateWithTools(ctx, "", readPrompt)
+	if err != nil {
+		return fmt.Errorf("failed to generate image descriptions: %w", err)
+	}
+
+	d.rootSessionStore.AppendMessage("system", descOutput)
+	return nil
+}
+
+// parseImagePaths 解析图片路径字符串
+// 格式：图片1: ./static/nv.png,图片2: ./static/nan.png
+func parseImagePaths(imagesStr string) []string {
+	var paths []string
+	// 按逗号分割
+	parts := strings.Split(imagesStr, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		// 查找冒号后的路径
+		if idx := strings.Index(part, ":"); idx >= 0 && idx < len(part)-1 {
+			path := strings.TrimSpace(part[idx+1:])
+			// 简单验证是否是图片路径
+			if strings.HasSuffix(strings.ToLower(path), ".png") ||
+				strings.HasSuffix(strings.ToLower(path), ".jpg") ||
+				strings.HasSuffix(strings.ToLower(path), ".jpeg") ||
+				strings.HasSuffix(strings.ToLower(path), ".gif") ||
+				strings.HasSuffix(strings.ToLower(path), ".webp") {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+// buildImageSection 构建图片描述说明
+func buildImageSection(imageInsights []string) string {
+	if len(imageInsights) == 0 {
+		return ""
+	}
+
+	imageSection := "【图片资产描述】\n"
+	for _, insight := range imageInsights {
+		imageSection += insight + "\n"
+	}
+	imageSection += "请将上述图片描述作为人物/场景参考，补充到研究报告的 image_insights 字段中。\n"
+	return imageSection
+}
+
+// getCurrentBranchID 获取当前分支的 leaf ID
+func (d *Director) getCurrentBranchID() string {
+	branch := d.rootSessionStore.GetBranch()
+	if len(branch) == 0 {
+		return ""
+	}
+	return branch[len(branch)-1].GetID()
+}
+
+// createBranchFromRoot 从根 session 创建新分支（新的 session store）
+func (d *Director) createBranchFromRoot(branchName string) (session.SessionStore, error) {
+	// 获取根 session 的当前 leaf
+	branch := d.rootSessionStore.GetBranch()
+	if len(branch) == 0 {
+		return nil, fmt.Errorf("root session has no entries")
+	}
+	rootLeafID := branch[len(branch)-1].GetID()
+
+	fmt.Printf("[Director] Root session file: %s\n", d.rootSessionStore.GetSessionFile())
+
+	// 使用 CreateBranch 创建新分支，不会修改根 session
+	newStore, err := d.rootSessionStore.CreateBranch(rootLeafID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 获取新分支 session 的信息
+	newSessionID := newStore.GetSessionID()
+	newSessionFile := newStore.GetSessionFile()
+	fmt.Printf("[Director] Created %s session: %s (file: %s)\n", branchName, newSessionID, newSessionFile)
+
+	// 在新分支中添加分支标记
+	newStore.AppendMessage("system", fmt.Sprintf("【%s 分支】由根 session 创建\n", branchName))
+
+	// 打印新分支的 session 历史
+	d.printBranchHistory(branchName, newStore)
+
+	return newStore, nil
+}
+
+// printBranchHistory 打印分支的 session 历史
+func (d *Director) printBranchHistory(branchName string, store session.SessionStore) {
+	branch := store.GetBranch()
+	if len(branch) == 0 {
+		fmt.Printf("[Director] %s branch is empty\n", branchName)
+		return
+	}
+
+	fmt.Printf("[Director] %s branch history (%d entries):\n", branchName, len(branch))
+	for i, entry := range branch {
+		var role, content string
+		if me, ok := entry.(*session.MessageEntry); ok {
+			role = me.Message.Role
+			content = me.Message.Content
+			if len(content) > 100 {
+				content = content[:100] + "..."
+			}
+			fmt.Printf("  [%d] %s: %s\n", i, role, content)
+		} else {
+			fmt.Printf("  [%d] entry type: %s\n", i, entry.GetType())
+		}
+	}
+}
+
 // ParseVideoScript 解析视频脚本 JSON
 func ParseVideoScript(jsonStr string) (*schema.VideoScript, error) {
 	var script schema.VideoScript
@@ -374,7 +570,7 @@ func (p *ParallelDirector) ParallelResearch(ctx context.Context, themes []string
 
 			result, _ := p.director.researcher.Research(ctx, &schema.ResearcherInput{
 				Theme:   t,
-				Aspects: []string{"最新动态", "数据统计", "案例分析"},
+				Aspects: []string{"最新AI视频动态", "主题相关话题数据统计", "主题相关视频案例分析", "视频热度"},
 			})
 
 			mu.Lock()

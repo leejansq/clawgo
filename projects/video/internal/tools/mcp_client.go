@@ -411,9 +411,9 @@ func (c *MCPClient) CallTool(ctx context.Context, toolName string, arguments map
 	stdin.Write(append(callBytes, '\n'))
 	stdin.Close()
 
-	// 设置超时
-	timeout := time.AfterFunc(30*time.Second, func() {
-		log.Printf("MCP call timeout, killing process")
+	// 设置超时（图片理解等任务可能需要更长时间）
+	timeout := time.AfterFunc(120*time.Second, func() {
+		log.Printf("MCP call timeout (120s), killing process")
 		cmd.Process.Kill()
 	})
 	defer timeout.Stop()

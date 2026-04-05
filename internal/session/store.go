@@ -51,7 +51,8 @@ type SessionStore interface {
 	GetHeader() *SessionHeader
 
 	// Tree operations
-	Branch(branchFromID string) error // Start new branch from entry
+	Branch(branchFromID string) error                         // Start new branch from entry (replaces current store state)
+	CreateBranch(branchFromID string) (*memorySessionStore, error) // Create a new branch store without modifying current store
 	ResetLeaf() error                 // Reset to root (current leaf)
 
 	// Stats
@@ -667,8 +668,38 @@ func (s *memorySessionStore) Branch(branchFromID string) error {
 	return nil
 }
 
+// CreateBranch creates a new branch store from the specified entry without modifying the current store.
+// Returns the new branch store, following OpenClaw's pattern where Branch creates a NEW session file.
+// The current store remains unchanged.
+func (s *memorySessionStore) CreateBranch(branchFromID string) (*memorySessionStore, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Verify the entry exists
+	found := false
+	for _, e := range s.entries {
+		if e.GetID() == branchFromID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("entry not found: %s", branchFromID)
+	}
+
+	// Create a new branched session - this does not modify s
+	newStore, err := s.createBranchedSessionLocked(branchFromID)
+	if err != nil {
+		return nil, err
+	}
+
+	return newStore, nil
+}
+
 // createBranchedSessionLocked creates a new branched session (must be called with lock held)
-// The new session file references the parent via ParentSession header field
+// Following OpenClaw's pattern: creates a new session file containing only the path from root to the specified leaf.
+// The new session file references the parent via ParentSession header field.
+// Unlike branch() which only moves the leaf pointer, this creates a new independent session file.
 func (s *memorySessionStore) createBranchedSessionLocked(branchFromID string) (*memorySessionStore, error) {
 	// Generate new session ID
 	newSessionID := generateID()
@@ -686,102 +717,70 @@ func (s *memorySessionStore) createBranchedSessionLocked(branchFromID string) (*
 		ParentSession: s.sessionFile, // Reference to parent session file
 	}
 
-	// Find the branch point entry to get its children
-	branchPointChildren := s.getChildren(branchFromID, nil)
+	// Build ID -> entry map for original entries
+	entryByID := make(map[string]SessionEntry)
+	for _, e := range s.entries {
+		entryByID[e.GetID()] = e
+	}
 
-	// Build new entries starting from branch point children
-	// Each child's parentID becomes nil (root of new branch)
-	newEntries := make([]SessionEntry, 0)
-
-	// Create a branch summary entry explaining this branch
-	branchSummary := NewBranchSummaryEntry(nil, fmt.Sprintf("Branched from session %s at entry %s", s.sessionID, branchFromID))
-	newEntries = append(newEntries, branchSummary)
-
-	// Add children of branch point with parentID reset to branch summary
-	for _, child := range branchPointChildren {
-		switch e := child.(type) {
-		case *MessageEntry:
-			newEntry := &MessageEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				Message: e.Message,
-			}
-			newEntries = append(newEntries, newEntry)
-		case *CompactionEntry:
-			newEntry := &CompactionEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				Summary:          e.Summary,
-				FirstKeptEntryID: e.FirstKeptEntryID,
-				TokensBefore:     e.TokensBefore,
-			}
-			newEntries = append(newEntries, newEntry)
-		case *ModelChangeEntry:
-			newEntry := &ModelChangeEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				Provider: e.Provider,
-				ModelID:  e.ModelID,
-			}
-			newEntries = append(newEntries, newEntry)
-		case *LabelEntry:
-			newEntry := &LabelEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				TargetID: e.TargetID,
-				Label:    e.Label,
-			}
-			newEntries = append(newEntries, newEntry)
-		case *CustomEntry:
-			newEntry := &CustomEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				CustomType: e.CustomType,
-				Data:       e.Data,
-			}
-			newEntries = append(newEntries, newEntry)
-		case *SessionInfoEntry:
-			newEntry := &SessionInfoEntry{
-				BaseEntry: BaseEntry{
-					ID:        generateID(),
-					ParentID:  &branchSummary.ID,
-					Type:      e.Type,
-					Timestamp: e.Timestamp,
-				},
-				Name: e.Name,
-			}
-			newEntries = append(newEntries, newEntry)
+	// Find the root entry (entry with nil or empty parent)
+	var rootID string
+	for _, e := range s.entries {
+		if e.GetParentID() == nil || *e.GetParentID() == "" {
+			rootID = e.GetID()
+			break
 		}
 	}
 
-	// Find current leaf (last entry with no children in new entries)
+	// Collect path from root to branchFromID
+	pathIDs := make([]string, 0)
+	current := branchFromID
+	for current != "" {
+		pathIDs = append([]string{current}, pathIDs...) // prepend to get root-first order
+		if current == rootID {
+			break
+		}
+		entry, ok := entryByID[current]
+		if !ok || entry.GetParentID() == nil {
+			break
+		}
+		current = *entry.GetParentID()
+	}
+
+	// Create ID mapping (old ID -> new ID)
+	idMapping := make(map[string]string)
+	for _, oldID := range pathIDs {
+		idMapping[oldID] = generateID()
+	}
+
+	// Build new entries preserving the path structure with new IDs
+	newEntries := make([]SessionEntry, 0)
+	for _, oldID := range pathIDs {
+		oldEntry := entryByID[oldID]
+		newID := idMapping[oldID]
+
+		// Compute new parent ID (nil for root)
+		var newParentID *string
+		if oldEntry.GetParentID() != nil && *oldEntry.GetParentID() != "" {
+			mappedParentID := idMapping[*oldEntry.GetParentID()]
+			newParentID = &mappedParentID
+		}
+
+		newEntry := s.cloneEntryWithID(oldEntry, newID, newParentID)
+		newEntries = append(newEntries, newEntry)
+	}
+
+	// Find current leaf (the last entry in the path)
+	newLeafID := idMapping[branchFromID]
+
+	// Create new store
 	newStore := &memorySessionStore{
 		sessionFile: newSessionFile,
 		sessionID:   newSessionID,
 		header:      newHeader,
 		entries:     newEntries,
+		currentLeaf: newLeafID,
 	}
-	newStore.currentLeaf = newStore.findCurrentLeaf()
 
 	// Persist the new session file
 	if err := newStore.persistLocked(); err != nil {
@@ -789,6 +788,91 @@ func (s *memorySessionStore) createBranchedSessionLocked(branchFromID string) (*
 	}
 
 	return newStore, nil
+}
+
+// cloneEntryWithID creates a new entry with the given ID and parentID, copying data from the original
+func (s *memorySessionStore) cloneEntryWithID(entry SessionEntry, newID string, newParentID *string) SessionEntry {
+	switch e := entry.(type) {
+	case *MessageEntry:
+		return &MessageEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			Message: e.Message,
+		}
+	case *CompactionEntry:
+		return &CompactionEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			Summary:          e.Summary,
+			FirstKeptEntryID: e.FirstKeptEntryID,
+			TokensBefore:     e.TokensBefore,
+		}
+	case *ModelChangeEntry:
+		return &ModelChangeEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			Provider: e.Provider,
+			ModelID:  e.ModelID,
+		}
+	case *LabelEntry:
+		return &LabelEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			TargetID: e.TargetID,
+			Label:    e.Label,
+		}
+	case *CustomEntry:
+		return &CustomEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			CustomType: e.CustomType,
+			Data:       e.Data,
+		}
+	case *SessionInfoEntry:
+		return &SessionInfoEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			Name: e.Name,
+		}
+	case *BranchSummaryEntry:
+		return &BranchSummaryEntry{
+			BaseEntry: BaseEntry{
+				ID:        newID,
+				ParentID:  newParentID,
+				Type:      e.Type,
+				Timestamp: e.Timestamp,
+			},
+			ParentID: e.ParentID,
+			Summary:  e.Summary,
+		}
+	default:
+		// Fallback - should not happen for well-typed entries
+		return nil
+	}
 }
 
 // ResetLeaf resets to the root (null parent)

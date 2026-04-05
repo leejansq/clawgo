@@ -257,12 +257,13 @@ func TestBranch(t *testing.T) {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
 
-	// Create main branch: root -> A -> B -> C
+	// Create main branch: A -> B -> C (where A is the root/first message)
 	_, _ = store.AppendMessage("user", "A")
 	idB, _ := store.AppendMessage("assistant", "B")
 	_, _ = store.AppendMessage("user", "C")
 
-	// Branch at B
+	// Branch at B - this replaces the current store's state with the new branch
+	// Following OpenClaw's createBranchedSession: path from root to B
 	err = store.Branch(idB)
 	if err != nil {
 		t.Fatalf("Branch failed: %v", err)
@@ -272,16 +273,36 @@ func TestBranch(t *testing.T) {
 	sessionFile := store.GetSessionFile()
 	entries := store.GetEntries()
 
-	// The branch session should have BranchSummary + descendants of B
-	// B's descendants are C
-	if len(entries) < 1 {
-		t.Fatalf("branch should have at least BranchSummary entry")
+	// The branch session should have the path from root (A) to B: A -> B
+	// Note: C is NOT included because B is the branch point
+	if len(entries) != 2 {
+		t.Errorf("branch should have 2 entries (A, B), got %d", len(entries))
 	}
 
-	// First entry should be BranchSummary
-	bs := entries[0].(*BranchSummaryEntry)
-	if bs.Type != EntryTypeBranchSummary {
-		t.Errorf("first entry type = %s, want %s", bs.Type, EntryTypeBranchSummary)
+	// Verify the path structure: entries should be in order A -> B
+	for i, entry := range entries {
+		if i == 0 {
+			// First entry should be root (A) with nil parent
+			if entry.GetParentID() != nil && *entry.GetParentID() != "" {
+				t.Errorf("entry[0] should be root with nil parent, got parent %s", *entry.GetParentID())
+			}
+			msg := entry.(*MessageEntry)
+			if msg.Message.Content != "A" {
+				t.Errorf("entry[0] content = %s, want A", msg.Message.Content)
+			}
+		} else {
+			// Entry B should have parent pointing to A
+			parentID := entry.GetParentID()
+			if parentID == nil || *parentID == "" {
+				t.Errorf("entry[%d] should have parent, got nil", i)
+			} else if *parentID != entries[i-1].GetID() {
+				t.Errorf("entry[%d] parent = %s, want %s", i, *parentID, entries[i-1].GetID())
+			}
+			msg := entry.(*MessageEntry)
+			if msg.Message.Content != "B" {
+				t.Errorf("entry[%d] content = %s, want B", i, msg.Message.Content)
+			}
+		}
 	}
 
 	// Check parent session reference
@@ -294,6 +315,315 @@ func TestBranch(t *testing.T) {
 	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {
 		t.Error("branch session file should exist")
 	}
+}
+
+func TestCreateBranch(t *testing.T) {
+	tmpDir := tempTestDir(t)
+
+	store := NewSessionStore()
+	originalSessionID, err := store.CreateSession(tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+
+	// Create main branch: A -> B -> C (where A is the root/first message)
+	_, _ = store.AppendMessage("user", "A")
+	idB, _ := store.AppendMessage("assistant", "B")
+	_, _ = store.AppendMessage("user", "C")
+
+	// Keep track of original state
+	originalSessionFile := store.GetSessionFile()
+	originalEntryCount := len(store.GetEntries())
+
+	// CreateBranch at B - should NOT modify original store
+	// New session should contain the path from root (A) to B: A -> B
+	// Note: Following OpenClaw's createBranchedSession semantics - C is NOT included
+	branchStore, err := store.CreateBranch(idB)
+	if err != nil {
+		t.Fatalf("CreateBranch failed: %v", err)
+	}
+	if branchStore == nil {
+		t.Fatal("CreateBranch returned nil store")
+	}
+
+	// Verify original store is UNCHANGED
+	if store.GetSessionID() != originalSessionID {
+		t.Errorf("original store sessionID changed to %s, want %s", store.GetSessionID(), originalSessionID)
+	}
+	if store.GetSessionFile() != originalSessionFile {
+		t.Errorf("original store sessionFile changed to %s, want %s", store.GetSessionFile(), originalSessionFile)
+	}
+	if len(store.GetEntries()) != originalEntryCount {
+		t.Errorf("original store entry count changed to %d, want %d", len(store.GetEntries()), originalEntryCount)
+	}
+
+	// Verify branch store is correct
+	branchSessionID := branchStore.GetSessionID()
+	if branchSessionID == originalSessionID {
+		t.Error("branch store should have different sessionID than original")
+	}
+	branchSessionFile := branchStore.GetSessionFile()
+	if branchSessionFile == originalSessionFile {
+		t.Error("branch store should have different sessionFile than original")
+	}
+
+	// Branch should have path from root (A) to B: A -> B (2 entries)
+	branchEntries := branchStore.GetEntries()
+	if len(branchEntries) != 2 {
+		t.Errorf("branch store should have 2 entries (A, B), got %d", len(branchEntries))
+	}
+	for _, entry := range branchStore.GetBranch() {
+		t.Log(">>>", entry)
+	}
+
+	// First entry (A) should be root with nil parent
+	if branchEntries[0].GetParentID() != nil && *branchEntries[0].GetParentID() != "" {
+		t.Errorf("branchEntries[0] should be root with nil parent, got %s", *branchEntries[0].GetParentID())
+	}
+	msgA := branchEntries[0].(*MessageEntry)
+	if msgA.Message.Content != "A" {
+		t.Errorf("branchEntries[0] content = %s, want A", msgA.Message.Content)
+	}
+
+	// Second entry (B) should have parent pointing to A
+	if branchEntries[1].GetParentID() == nil || *branchEntries[1].GetParentID() != branchEntries[0].GetID() {
+		t.Errorf("branchEntries[1] parent should be branchEntries[0], got %v", branchEntries[1].GetParentID())
+	}
+	msgB := branchEntries[1].(*MessageEntry)
+	if msgB.Message.Content != "B" {
+		t.Errorf("branchEntries[1] content = %s, want B", msgB.Message.Content)
+	}
+
+	// Check parent session reference in branch
+	parentSession := branchStore.GetParentSession()
+	if parentSession == "" {
+		t.Error("branch store parentSession should not be empty")
+	}
+	if parentSession != originalSessionFile {
+		t.Errorf("branch store parentSession = %s, want %s", parentSession, originalSessionFile)
+	}
+}
+
+func TestCreateBranchFullPath(t *testing.T) {
+	// Comprehensive test for createBranchedSessionLocked to verify it follows OpenClaw's
+	// createBranchedSession(leafId) semantics:
+	// "Create a new session file containing only the path from root to the specified leaf."
+	tmpDir := tempTestDir(t)
+
+	store := NewSessionStore()
+	originalSessionID, err := store.CreateSession(tmpDir)
+	if err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	originalSessionFile := store.GetSessionFile()
+
+	// Create a complex session structure:
+	// A (user) -> B (assistant) -> C (user) -> D (assistant) -> E (user)
+	//                 |
+	//                 +-> F (user) -> G (assistant) [branch from B]
+	msgA, _ := store.AppendMessage("user", "Message A")
+	msgB, _ := store.AppendMessage("assistant", "Message B")
+	msgC, _ := store.AppendMessage("user", "Message C")
+	msgD, _ := store.AppendMessage("assistant", "Message D")
+	msgE, _ := store.AppendMessage("user", "Message E")
+
+	// Test 1: Branch at root (A) - should only contain A
+	t.Run("branch_at_root", func(t *testing.T) {
+		branchStore, err := store.CreateBranch(msgA)
+		if err != nil {
+			t.Fatalf("CreateBranch at root failed: %v", err)
+		}
+
+		entries := branchStore.GetEntries()
+		if len(entries) != 1 {
+			t.Errorf("branch at root should have 1 entry, got %d", len(entries))
+		}
+
+		// Verify it's msgA
+		msg := entries[0].(*MessageEntry)
+		if msg.Message.Content != "Message A" {
+			t.Errorf("entry content = %s, want Message A", msg.Message.Content)
+		}
+
+		// Verify parent is nil (root)
+		if entries[0].GetParentID() != nil && *entries[0].GetParentID() != "" {
+			t.Errorf("root entry should have nil parent, got %s", *entries[0].GetParentID())
+		}
+	})
+
+	// Test 2: Branch at B - should contain A -> B (not C, D, E)
+	t.Run("branch_at_B", func(t *testing.T) {
+		branchStore, err := store.CreateBranch(msgB)
+		if err != nil {
+			t.Fatalf("CreateBranch at B failed: %v", err)
+		}
+
+		entries := branchStore.GetEntries()
+		if len(entries) != 2 {
+			t.Errorf("branch at B should have 2 entries (A, B), got %d", len(entries))
+		}
+
+		// A should be root
+		if entries[0].GetParentID() != nil && *entries[0].GetParentID() != "" {
+			t.Errorf("A should be root with nil parent, got %s", *entries[0].GetParentID())
+		}
+		msgA := entries[0].(*MessageEntry)
+		if msgA.Message.Content != "Message A" {
+			t.Errorf("entries[0] content = %s, want Message A", msgA.Message.Content)
+		}
+
+		// B should have parent A
+		if entries[1].GetParentID() == nil || *entries[1].GetParentID() != entries[0].GetID() {
+			t.Errorf("B's parent should be A")
+		}
+		msgB := entries[1].(*MessageEntry)
+		if msgB.Message.Content != "Message B" {
+			t.Errorf("entries[1] content = %s, want Message B", msgB.Message.Content)
+		}
+
+		// Verify branch session file is different
+		if branchStore.GetSessionFile() == originalSessionFile {
+			t.Error("branch session file should be different from original")
+		}
+
+		// Verify parent session reference
+		if branchStore.GetParentSession() != originalSessionFile {
+			t.Errorf("parentSession = %s, want %s", branchStore.GetParentSession(), originalSessionFile)
+		}
+	})
+
+	// Test 3: Branch at D - should contain A -> B -> C -> D
+	t.Run("branch_at_D", func(t *testing.T) {
+		branchStore, err := store.CreateBranch(msgD)
+		if err != nil {
+			t.Fatalf("CreateBranch at D failed: %v", err)
+		}
+
+		entries := branchStore.GetEntries()
+		if len(entries) != 4 {
+			t.Errorf("branch at D should have 4 entries (A, B, C, D), got %d", len(entries))
+		}
+
+		// Verify path: A -> B -> C -> D
+		expectedContents := []string{"Message A", "Message B", "Message C", "Message D"}
+		for i, expected := range expectedContents {
+			msg := entries[i].(*MessageEntry)
+			if msg.Message.Content != expected {
+				t.Errorf("entries[%d] content = %s, want %s", i, msg.Message.Content, expected)
+			}
+		}
+
+		// Verify parent chain
+		for i := 1; i < len(entries); i++ {
+			parentID := entries[i].GetParentID()
+			if parentID == nil || *parentID != entries[i-1].GetID() {
+				t.Errorf("entries[%d] parent should be entries[%d]", i, i-1)
+			}
+		}
+	})
+
+	// Test 4: Branch at E (leaf) - should contain A -> B -> C -> D -> E
+	t.Run("branch_at_E", func(t *testing.T) {
+		branchStore, err := store.CreateBranch(msgE)
+		if err != nil {
+			t.Fatalf("CreateBranch at E failed: %v", err)
+		}
+
+		entries := branchStore.GetEntries()
+		if len(entries) != 5 {
+			t.Errorf("branch at E should have 5 entries (A, B, C, D, E), got %d", len(entries))
+		}
+
+		// Verify E is the leaf (currentLeaf)
+		if branchStore.GetSessionFile() != "" {
+			// The new store's currentLeaf should be E
+			branch := branchStore.GetBranch()
+			if len(branch) != 5 {
+				t.Errorf("GetBranch should return 5 entries, got %d", len(branch))
+			}
+			lastEntry := branch[len(branch)-1].(*MessageEntry)
+			if lastEntry.Message.Content != "Message E" {
+				t.Errorf("leaf content = %s, want Message E", lastEntry.Message.Content)
+			}
+		}
+	})
+
+	// Test 5: Original session is not modified
+	t.Run("original_unchanged", func(t *testing.T) {
+		if store.GetSessionID() != originalSessionID {
+			t.Errorf("original sessionID changed to %s", store.GetSessionID())
+		}
+		if store.GetSessionFile() != originalSessionFile {
+			t.Errorf("original sessionFile changed to %s", store.GetSessionFile())
+		}
+		entries := store.GetEntries()
+		if len(entries) != 5 {
+			t.Errorf("original should still have 5 entries, got %d", len(entries))
+		}
+	})
+
+	// Test 6: Entry IDs are regenerated (not same as original)
+	t.Run("ids_regenerated", func(t *testing.T) {
+		branchStore, err := store.CreateBranch(msgC)
+		if err != nil {
+			t.Fatalf("CreateBranch at C failed: %v", err)
+		}
+
+		branchEntries := branchStore.GetEntries()
+		originalEntries := store.GetEntries()
+
+		// All IDs should be different
+		for _, branchEntry := range branchEntries {
+			for _, origEntry := range originalEntries {
+				if branchEntry.GetID() == origEntry.GetID() {
+					t.Errorf("branch entry ID %s should not match original entry ID %s",
+						branchEntry.GetID(), origEntry.GetID())
+				}
+			}
+		}
+	})
+
+	// Test 7: Entry types preserved correctly
+	t.Run("entry_types_preserved", func(t *testing.T) {
+		// Add different entry types
+		_, _ = store.AppendCompaction("compaction summary", msgC, 1000)
+		modelID, _ := store.AppendModelChange("anthropic", "claude-3-sonnet")
+
+		// Branch at model change entry
+		branchStore, err := store.CreateBranch(modelID)
+		if err != nil {
+			t.Fatalf("CreateBranch at model change failed: %v", err)
+		}
+
+		entries := branchStore.GetEntries()
+		// Should have: A, B, C, compaction, D, E, modelChange (7 entries)
+		// Full path from root (A) to modelID
+		if len(entries) != 7 {
+			t.Errorf("branch should have 7 entries (full path A->B->C->compaction->D->E->modelChange), got %d", len(entries))
+		}
+
+		// Find and verify the model change entry
+		foundModelChange := false
+		for _, entry := range entries {
+			if entry.GetType() == EntryTypeModelChange {
+				foundModelChange = true
+				mc := entry.(*ModelChangeEntry)
+				if mc.Provider != "anthropic" || mc.ModelID != "claude-3-sonnet" {
+					t.Errorf("model change entry has wrong provider/model: %s/%s",
+						mc.Provider, mc.ModelID)
+				}
+			}
+			if entry.GetType() == EntryTypeCompaction {
+				ce := entry.(*CompactionEntry)
+				if ce.Summary != "compaction summary" {
+					t.Errorf("compaction entry has wrong summary: %s", ce.Summary)
+				}
+			}
+		}
+		if !foundModelChange {
+			t.Error("model change entry not found in branch")
+		}
+	})
 }
 
 func TestTruncateEntries(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
+	"github.com/leejansq/clawgo/internal/session"
 	"github.com/leejansq/clawgo/projects/video/pkg/prompt"
 	videoschema "github.com/leejansq/clawgo/projects/video/pkg/schema"
 )
@@ -112,13 +113,14 @@ type Session struct {
 
 // Manager 子智能体管理器
 type Manager struct {
-	mu             sync.RWMutex
-	sessions       map[string]*Session
-	cm             model.ToolCallingChatModel
-	cmWithTools    model.ToolCallingChatModel // 缓存绑定工具后的模型
-	reactAgent     *react.Agent               // 缓存的 React agent
-	toolProviders  []ToolProvider
-	conversationHistory []*schema.Message      // 多轮对话历史（按时间顺序存储）
+	mu                  sync.RWMutex
+	sessions            map[string]*Session
+	cm                  model.ToolCallingChatModel
+	cmWithTools         model.ToolCallingChatModel // 缓存绑定工具后的模型
+	reactAgent          *react.Agent               // 缓存的 React agent
+	toolProviders       []ToolProvider
+	conversationHistory []*schema.Message    // 多轮对话历史（按时间顺序存储）
+	sessionStore        session.SessionStore // clawgo session store（用于分支）
 }
 
 // NewManager 创建管理器（使用 ToolCallingChatModel）
@@ -145,6 +147,85 @@ func (m *Manager) ClearConversationHistory() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.conversationHistory = nil
+}
+
+// SetSessionStore 设置 session store（用于分支机制）
+func (m *Manager) SetSessionStore(s session.SessionStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionStore = s
+}
+
+// GetSessionStore 获取 session store
+func (m *Manager) GetSessionStore() session.SessionStore {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.sessionStore
+}
+
+// AppendSessionMessage 追加消息到 session store（如果有）
+func (m *Manager) AppendSessionMessage(role, content string) {
+	m.mu.RLock()
+	s := m.sessionStore
+	m.mu.RUnlock()
+	if s != nil {
+		s.AppendMessage(role, content)
+	}
+}
+
+// WithBypassedSession 临时跳过 session history，执行函数后恢复
+// 用于 Critic 等不需要使用 session 分支的场景
+func (m *Manager) WithBypassedSession(fn func() error) error {
+	// 暂存当前 session store
+	m.mu.Lock()
+	origStore := m.sessionStore
+	// 清空 session store
+	m.sessionStore = nil
+	m.mu.Unlock()
+
+	// 执行函数
+	err := fn()
+
+	// 恢复 session store
+	m.mu.Lock()
+	m.sessionStore = origStore
+	m.mu.Unlock()
+
+	return err
+}
+
+// GetSessionBranch 获取当前 session branch
+func (m *Manager) GetSessionBranch() []*schema.Message {
+	m.mu.RLock()
+	s := m.sessionStore
+	m.mu.RUnlock()
+	if s == nil {
+		return nil
+	}
+
+	branch := s.GetBranch()
+	if len(branch) == 0 {
+		return nil
+	}
+
+	// 转换为 schema.Message
+	var messages []*schema.Message
+	for _, entry := range branch {
+		if me, ok := entry.(*session.MessageEntry); ok {
+			switch me.Message.Role {
+			case "user":
+				messages = append(messages, schema.UserMessage(me.Message.Content))
+			case "assistant":
+				messages = append(messages, &schema.Message{
+					Role:    schema.RoleType("assistant"),
+					Content: me.Message.Content,
+				})
+			default:
+				messages = append(messages, schema.UserMessage(me.Message.Content))
+			}
+		}
+	}
+	return messages
 }
 
 // GetConversationHistory 获取对话历史
@@ -362,6 +443,12 @@ func (m *Manager) GenerateWithTools(ctx context.Context, systemPrompt, userInput
 
 // GenerateWithToolsAndHistory 调用 LLM 生成（支持多轮对话记忆）
 func (m *Manager) GenerateWithToolsAndHistory(ctx context.Context, systemPrompt, userInput string, history []*schema.Message) (string, error) {
+	// 如果有 session store，优先使用 session branch 作为历史
+	branchHistory := m.GetSessionBranch()
+	if len(branchHistory) > 0 {
+		history = branchHistory
+	}
+
 	// 构建消息
 	input := []*schema.Message{
 		schema.SystemMessage(systemPrompt),
@@ -484,7 +571,7 @@ func (m *Manager) ExecuteScriptwriter(ctx context.Context, input *videoschema.Sc
 	// 构建 prompt
 	userPrompt := prompt.BuildScriptwriterPrompt(input)
 
-	// 获取对话历史（用于多轮对话记忆）
+	// 获取对话历史（用于多轮对话记忆）- 如果有 session store 会自动使用 branch
 	history := m.GetConversationHistory()
 
 	// 调用 LLM（带多轮对话历史）
@@ -494,7 +581,11 @@ func (m *Manager) ExecuteScriptwriter(ctx context.Context, input *videoschema.Sc
 		return nil, err
 	}
 
-	// 追加用户消息和助手回复到历史
+	// 追加用户消息和助手回复到 session store（如果存在）
+	m.AppendSessionMessage("user", userPrompt)
+	m.AppendSessionMessage("assistant", output)
+
+	// 同时保留一份到内存历史（兼容）
 	m.AppendToHistory(schema.RoleType("user"), userPrompt)
 	m.AppendToHistory(schema.RoleType("assistant"), output)
 

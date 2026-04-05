@@ -27,10 +27,9 @@ func NewResearcher(mgr *manager.Manager) *Researcher {
 	}
 }
 
-// Research 执行研究任务
-// 通过 LLM + Tool 的方式，让 LLM 自主决定何时调用 web_search
+// Research 执行研究任务（图片解析由 Director 完成）
 func (r *Researcher) Research(ctx context.Context, input *schema.ResearcherInput) (*schema.ResearcherOutput, error) {
-	// 构建 LLM 输入，让 LLM 自己决定是否调用 web_search
+	// 构建 LLM 输入
 	aspects := ""
 	if len(input.Aspects) > 0 {
 		aspects = "\n重点关注以下方面：\n"
@@ -42,13 +41,6 @@ func (r *Researcher) Research(ctx context.Context, input *schema.ResearcherInput
 	userInput := fmt.Sprintf(`请为视频主题"%s"搜集研究资料。
 
 %s
-
-请使用 web_search 工具搜索相关信息，搜集：
-1. 主题概述和背景
-2. 最新资讯和动态
-3. 关键数据和统计
-4. 典型案例
-5. 发展趋势
 
 搜索完成后，请以 JSON 格式返回结构化的研究结果：
 {
@@ -86,12 +78,12 @@ func getResearcherPrompt() string {
 
 你的职责：
 1. 理解视频主题和目标受众
-2. 使用 web_search 工具搜索相关信息
+2. 使用 web_search 工具搜索主题相关信息
 3. 搜集同时切合主题和受众喜好相关的信息，以及趋势信息
 4. 收集视频以及影视案例，分析其内容、镜头和风格
 5. 将搜集到的信息结构化整理
 
-重要：你有权使用 web_search 工具来获取最新信息。当需要了解某个主题的相关信息时，请主动调用 web_search。
+重要：你有权使用 web_search 工具来获取联网信息。
 
 输出格式要求：
 请以 JSON 格式返回研究结果，包含以下字段：

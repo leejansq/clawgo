@@ -62,6 +62,11 @@ func main() {
 		fmt.Println("Local web_search tool registered")
 	}
 
+	// 注册 read 工具（用于读取参考图片，支持图片和文本文件）
+	readToolProvider := tools.NewReadToolProvider(".", nil)
+	mgr.RegisterToolProvider(readToolProvider)
+	fmt.Println("Read tool registered")
+
 	// 初始化 Director
 	dir := director.NewDirector(mgr)
 
@@ -161,6 +166,10 @@ func generateScript(dir *director.Director, theme string, reader *bufio.Reader) 
 		strictDuration = true
 	}
 
+	fmt.Print("  图片资产 (格式: 图片1: ./static/nv.png,图片2: ./static/nan.png，直接回车跳过): ")
+	images, _ := reader.ReadString('\n')
+	images = strings.TrimSpace(images)
+
 	fmt.Println()
 	fmt.Println("--- 开始生成视频脚本 ---")
 	fmt.Println("  (LLM会根据需要自动调用web_search工具搜集资料)")
@@ -172,6 +181,7 @@ func generateScript(dir *director.Director, theme string, reader *bufio.Reader) 
 		TargetAudience: audience,
 		Duration:       duration,
 		StrictDuration: strictDuration,
+		Images:         images,
 	}
 
 	// 生成

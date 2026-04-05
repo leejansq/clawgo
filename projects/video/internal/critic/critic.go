@@ -26,6 +26,5 @@ func NewCritic(mgr *manager.Manager) *Critic {
 
 // Review 审查脚本
 func (c *Critic) Review(ctx context.Context, input *schema.CriticInput) (*schema.CriticOutput, error) {
-	// 调用 manager 执行
 	return c.mgr.ExecuteCritic(ctx, input)
 }
